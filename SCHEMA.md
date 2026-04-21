@@ -1,0 +1,159 @@
+# Supabase 스키마 설계 — 학원 출석체크 서비스
+
+**문서 버전** v0.1 | **작성일** 2026.04.20
+
+---
+
+## 1. 테이블 관계도
+
+```
+academies
+  └── students (N)
+        ├── student_parents (N)   ← 뒷자리 4자리 검색
+        └── attendance_logs (N)   ← 쿨타임 체크, 보강 메모
+              └── notification_logs (N)  ← 발송 상태, 재시도 관리
+```
+
+---
+
+## 2. 전체 스키마 SQL
+
+```sql
+-- 1. academies (학원)
+create table academies (
+  id                    uuid primary key default gen_random_uuid(),
+  name                  text not null,
+  admin_password_hash   text not null,   -- 관리자 로그인용 bcrypt 해시
+  created_at            timestamptz default now()
+);
+
+-- 2. students (학생)
+create table students (
+  id          uuid primary key default gen_random_uuid(),
+  academy_id  uuid references academies(id) on delete cascade,
+  name        text not null,
+  is_active   boolean default true,      -- 퇴원 시 소프트 삭제
+  created_at  timestamptz default now()
+);
+
+-- 3. student_parents (학부모 연락처, 1학생 N명)
+create table student_parents (
+  id           uuid primary key default gen_random_uuid(),
+  student_id   uuid references students(id) on delete cascade,
+  name         text,                     -- 예: 엄마, 아빠, 할머니
+  phone        text not null,            -- 전체 번호
+  phone_last4  text generated always as
+                 (right(phone, 4)) stored,
+  is_primary   boolean default false,    -- 대표 연락처 여부
+  created_at   timestamptz default now()
+);
+
+create index idx_student_parents_phone_last4
+  on student_parents(phone_last4, student_id);
+
+-- 4. attendance_logs (출석 기록)
+create type attendance_type as enum ('checkin', 'checkout');
+
+create table attendance_logs (
+  id          uuid primary key default gen_random_uuid(),
+  student_id  uuid references students(id) on delete cascade,
+  academy_id  uuid references academies(id) on delete cascade,
+  type        attendance_type not null,
+  checked_at  timestamptz default now(),
+  memo        text,                      -- 보강 메모 (원장 입력)
+  created_at  timestamptz default now()
+);
+
+create index idx_attendance_logs_student_date
+  on attendance_logs(student_id, checked_at desc);
+
+create index idx_attendance_logs_academy_date
+  on attendance_logs(academy_id, checked_at desc);
+
+-- 5. notification_logs (알림 발송 기록)
+create type notification_status as enum
+  ('pending', 'sent', 'failed', 'retrying');
+
+create table notification_logs (
+  id             uuid primary key default gen_random_uuid(),
+  attendance_id  uuid references attendance_logs(id) on delete cascade,
+  parent_id      uuid references student_parents(id) on delete cascade,
+  status         notification_status default 'pending',
+  attempt_count  int default 0,          -- 재시도 횟수 (최대 3)
+  next_retry_at  timestamptz,            -- 다음 재시도 예정 시각
+  sent_at        timestamptz,            -- 발송 성공 시각
+  error_message  text,                   -- 실패 사유
+  created_at     timestamptz default now()
+);
+```
+
+---
+
+## 3. 테이블별 설명
+
+| 테이블 | 역할 | 비고 |
+|---|---|---|
+| academies | 학원 정보 + 관리자 인증 | 멀티 학원 확장 대비 |
+| students | 학생 목록 | is_active로 소프트 삭제 |
+| student_parents | 학부모 연락처 (1학생 N명) | phone_last4 인덱스로 검색 최적화 |
+| attendance_logs | 등원/하원 기록 | memo 컬럼으로 보강 메모 처리 |
+| notification_logs | 알림톡 발송 상태 + 재시도 관리 | attempt_count 최대 3회 |
+
+---
+
+## 4. 핵심 쿼리
+
+### 뒷자리 4자리로 학생 찾기
+```sql
+select s.id, s.name, sp.id as parent_id
+from student_parents sp
+join students s on s.id = sp.student_id
+where sp.phone_last4 = '1234'
+  and s.academy_id = $academy_id
+  and s.is_active = true;
+```
+
+### 쿨타임 체크 (동일 타입 5분 이내)
+```sql
+select exists (
+  select 1 from attendance_logs
+  where student_id = $student_id
+    and type = $type
+    and checked_at > now() - interval '5 minutes'
+);
+```
+
+### 당일 미출석 학생 조회
+```sql
+select s.name
+from students s
+where s.academy_id = $academy_id
+  and s.is_active = true
+  and s.id not in (
+    select student_id from attendance_logs
+    where academy_id = $academy_id
+      and type = 'checkin'
+      and checked_at::date = current_date
+  );
+```
+
+---
+
+## 5. 설계 결정 사항 (ADR)
+
+| 결정 | 이유 |
+|---|---|
+| student_parents를 별도 테이블로 분리 | 학부모 N명 지원, 뒷자리 4자리 인덱스 검색 최적화 |
+| phone_last4를 generated column으로 | 저장 시 자동 계산, 별도 로직 불필요 |
+| is_active 소프트 삭제 | 퇴원 학생 출석 기록 보존 |
+| memo를 attendance_logs에 추가 | 결석일 기록에 보강 메모를 붙이는 구조가 자연스러움 |
+| admin_password_hash를 academies에 | Supabase Auth 없이 단순하게 처리, MVP에 적합 |
+| academies 테이블 유지 | 현재 1개지만 멀티 학원 확장 대비 |
+
+---
+
+## 6. 미결 사항 (Next Steps)
+
+- [ ] Supabase RLS(Row Level Security) 정책 설계
+- [ ] notification_logs 재시도 스케줄러 (pg_cron + Edge Function) 설계
+- [ ] 관리자 인증 방식 구체화 (JWT 또는 세션 쿠키)
