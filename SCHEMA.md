@@ -19,72 +19,72 @@ academies
 ## 2. 전체 스키마 SQL
 
 ```sql
--- 1. academies (학원)
-create table academies (
-  id                    uuid primary key default gen_random_uuid(),
-  name                  text not null,
-  admin_password_hash   text not null,   -- 관리자 로그인용 bcrypt 해시
-  created_at            timestamptz default now()
-);
+  -- 1. academies (학원)
+  create table academies (
+    id                    uuid primary key default gen_random_uuid(),
+    name                  text not null,
+    admin_password_hash   text not null,   -- 관리자 로그인용 bcrypt 해시
+    created_at            timestamptz default now()
+  );
 
--- 2. students (학생)
-create table students (
-  id          uuid primary key default gen_random_uuid(),
-  academy_id  uuid references academies(id) on delete cascade,
-  name        text not null,
-  is_active   boolean default true,      -- 퇴원 시 소프트 삭제
-  created_at  timestamptz default now()
-);
+  -- 2. students (학생)
+  create table students (
+    id          uuid primary key default gen_random_uuid(),
+    academy_id  uuid references academies(id) on delete cascade,
+    name        text not null,
+    is_active   boolean default true,      -- 퇴원 시 소프트 삭제
+    created_at  timestamptz default now()
+  );
 
--- 3. student_parents (학부모 연락처, 1학생 N명)
-create table student_parents (
-  id           uuid primary key default gen_random_uuid(),
-  student_id   uuid references students(id) on delete cascade,
-  name         text,                     -- 예: 엄마, 아빠, 할머니
-  phone        text not null,            -- 전체 번호
-  phone_last4  text generated always as
-                 (right(phone, 4)) stored,
-  is_primary   boolean default false,    -- 대표 연락처 여부
-  created_at   timestamptz default now()
-);
+  -- 3. student_parents (학부모 연락처, 1학생 N명)
+  create table student_parents (
+    id           uuid primary key default gen_random_uuid(),
+    student_id   uuid references students(id) on delete cascade,
+    name         text,                     -- 예: 엄마, 아빠, 할머니
+    phone        text not null,            -- 전체 번호
+    phone_last4  text generated always as
+                  (right(phone, 4)) stored,
+    is_primary   boolean default false,    -- 대표 연락처 여부
+    created_at   timestamptz default now()
+  );
 
-create index idx_student_parents_phone_last4
-  on student_parents(phone_last4, student_id);
+  create index idx_student_parents_phone_last4
+    on student_parents(phone_last4, student_id);
 
--- 4. attendance_logs (출석 기록)
-create type attendance_type as enum ('checkin', 'checkout');
+  -- 4. attendance_logs (출석 기록)
+  create type attendance_type as enum ('checkin', 'checkout');
 
-create table attendance_logs (
-  id          uuid primary key default gen_random_uuid(),
-  student_id  uuid references students(id) on delete cascade,
-  academy_id  uuid references academies(id) on delete cascade,
-  type        attendance_type not null,
-  checked_at  timestamptz default now(),
-  memo        text,                      -- 보강 메모 (원장 입력)
-  created_at  timestamptz default now()
-);
+  create table attendance_logs (
+    id          uuid primary key default gen_random_uuid(),
+    student_id  uuid references students(id) on delete cascade,
+    academy_id  uuid references academies(id) on delete cascade,
+    type        attendance_type not null,
+    checked_at  timestamptz default now(),
+    memo        text,                      -- 보강 메모 (원장 입력)
+    created_at  timestamptz default now()
+  );
 
-create index idx_attendance_logs_student_date
-  on attendance_logs(student_id, checked_at desc);
+  create index idx_attendance_logs_student_date
+    on attendance_logs(student_id, checked_at desc);
 
-create index idx_attendance_logs_academy_date
-  on attendance_logs(academy_id, checked_at desc);
+  create index idx_attendance_logs_academy_date
+    on attendance_logs(academy_id, checked_at desc);
 
--- 5. notification_logs (알림 발송 기록)
-create type notification_status as enum
-  ('pending', 'sent', 'failed', 'retrying');
+  -- 5. notification_logs (알림 발송 기록)
+  create type notification_status as enum
+    ('pending', 'sent', 'failed', 'retrying');
 
-create table notification_logs (
-  id             uuid primary key default gen_random_uuid(),
-  attendance_id  uuid references attendance_logs(id) on delete cascade,
-  parent_id      uuid references student_parents(id) on delete cascade,
-  status         notification_status default 'pending',
-  attempt_count  int default 0,          -- 재시도 횟수 (최대 3)
-  next_retry_at  timestamptz,            -- 다음 재시도 예정 시각
-  sent_at        timestamptz,            -- 발송 성공 시각
-  error_message  text,                   -- 실패 사유
-  created_at     timestamptz default now()
-);
+  create table notification_logs (
+    id             uuid primary key default gen_random_uuid(),
+    attendance_id  uuid references attendance_logs(id) on delete cascade,
+    parent_id      uuid references student_parents(id) on delete cascade,
+    status         notification_status default 'pending',
+    attempt_count  int default 0,          -- 재시도 횟수 (최대 3)
+    next_retry_at  timestamptz,            -- 다음 재시도 예정 시각
+    sent_at        timestamptz,            -- 발송 성공 시각
+    error_message  text,                   -- 실패 사유
+    created_at     timestamptz default now()
+  );
 ```
 
 ---

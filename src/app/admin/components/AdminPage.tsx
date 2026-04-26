@@ -9,6 +9,7 @@ import type { Student } from '../lib/mockData'
 import AttendanceTable from './AttendanceTable'
 import StudentList from './StudentList'
 import FailedNotifications from './FailedNotifications'
+import LogoutButton from './LogoutButton'
 
 type Page = 'dashboard' | 'records' | 'students' | 'failures'
 
@@ -55,76 +56,6 @@ function Avatar({ name, kind = 'neutral', size = 36 }: { name: string; kind?: 'w
       fontSize: size * 0.38, fontWeight: 700,
     }}>
       {name.slice(-1)}
-    </div>
-  )
-}
-
-// ─── Login ──────────────────────────────────────────────────────────────────
-
-function AdminLogin({ onLogin }: { onLogin: () => void }) {
-  const [pw, setPw] = useState('')
-  const [err, setErr] = useState(false)
-  const [show, setShow] = useState(false)
-
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (pw.length >= 4) { setErr(false); onLogin() }
-    else setErr(true)
-  }
-
-  return (
-    <div className="min-h-screen flex items-center justify-center p-6" style={{ background: '#FAFAF7' }}>
-      <form onSubmit={submit} className="w-full max-w-sm rounded-2xl p-10"
-        style={{ background: '#fff', border: '1px solid #EAEAE4', boxShadow: '0 20px 60px -20px rgba(0,0,0,0.08)' }}>
-        <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-xl mb-6"
-          style={{ background: '#141414' }}>엘</div>
-
-        <p className="text-sm font-medium" style={{ color: '#5B5B5B' }}>{ACADEMY_NAME}</p>
-        <h1 className="text-2xl font-extrabold mt-1 tracking-tight" style={{ color: '#141414' }}>
-          안녕하세요, 원장님
-        </h1>
-        <p className="text-sm mt-1.5 leading-relaxed" style={{ color: '#5B5B5B' }}>
-          비밀번호를 입력하시면 관리자 페이지로 들어갑니다
-        </p>
-
-        <div className="mt-7">
-          <label className="block text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: '#5B5B5B' }}>
-            PASSWORD
-          </label>
-          <div className="relative">
-            <input
-              type={show ? 'text' : 'password'}
-              value={pw}
-              onChange={e => { setPw(e.target.value); setErr(false) }}
-              placeholder="••••••"
-              autoFocus
-              className="w-full h-12 rounded-xl text-base outline-none pr-12 pl-3.5"
-              style={{
-                border: `1px solid ${err ? '#E5484D' : '#EAEAE4'}`,
-                background: '#fff', color: '#141414',
-                letterSpacing: show ? 0 : '0.3em',
-              }}
-            />
-            <button type="button" onClick={() => setShow(s => !s)}
-              className="absolute right-2 top-2 w-8 h-8 flex items-center justify-center rounded-lg"
-              style={{ color: '#9A9A9A' }}>
-              <Icon name={show ? 'eyeOff' : 'eye'} size={15} />
-            </button>
-          </div>
-          {err && <p className="text-xs mt-1.5" style={{ color: '#E5484D' }}>비밀번호는 4자리 이상이어야 합니다</p>}
-        </div>
-
-        <button type="submit"
-          className="w-full h-12 mt-5 rounded-xl text-white font-semibold text-sm flex items-center justify-center gap-2"
-          style={{ background: '#141414' }}>
-          로그인 <Icon name="chevronRight" size={16} />
-        </button>
-
-        <p className="text-xs text-center mt-5 pt-4" style={{ color: '#9A9A9A', borderTop: '1px solid #F2F2EC' }}>
-          비밀번호가 기억나지 않으시면{' '}
-          <span className="font-semibold" style={{ color: '#141414' }}>고객센터</span>로 문의해주세요
-        </p>
-      </form>
     </div>
   )
 }
@@ -270,13 +201,12 @@ function AdminDashboard() {
 
 type NavItem = { id: Page; label: string; iconName: string; badge?: number }
 
-function SidebarNav({ nav, activePage, setActivePage, sidebarOpen, setSidebarOpen, onLogout }: {
+function SidebarNav({ nav, activePage, setActivePage, sidebarOpen, setSidebarOpen }: {
   nav: NavItem[]
   activePage: Page
   setActivePage: (p: Page) => void
   sidebarOpen: boolean
   setSidebarOpen: (open: boolean) => void
-  onLogout: () => void
 }) {
   const w = sidebarOpen ? 240 : 72
   return (
@@ -330,7 +260,7 @@ function SidebarNav({ nav, activePage, setActivePage, sidebarOpen, setSidebarOpe
           <Icon name={sidebarOpen ? 'chevronLeft' : 'chevronRight'} size={16} />
           {sidebarOpen && '접기'}
         </button>
-        <button onClick={onLogout}
+        <LogoutButton
           className="w-full flex items-center gap-2.5 rounded-lg text-sm"
           style={{
             padding: sidebarOpen ? '8px 12px' : '8px', justifyContent: sidebarOpen ? 'flex-start' : 'center',
@@ -338,7 +268,7 @@ function SidebarNav({ nav, activePage, setActivePage, sidebarOpen, setSidebarOpe
           }}>
           <Icon name="logout" size={16} />
           {sidebarOpen && '로그아웃'}
-        </button>
+        </LogoutButton>
       </div>
     </aside>
   )
@@ -384,7 +314,8 @@ function BottomTabs({ nav, activePage, setActivePage }: {
 // ─── Root ────────────────────────────────────────────────────────────────────
 
 export default function AdminPage() {
-  const [loggedIn, setLoggedIn] = useState(false)
+  // 인증은 middleware.ts(/admin/* JWT 검증) + /admin/login 라우트가 담당.
+  // 이 컴포넌트가 렌더된다는 것 자체가 인증 통과를 의미하므로 별도 가드 불필요.
   const [activePage, setActivePage] = useState<Page>('dashboard')
   const [isMobile, setIsMobile] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -412,8 +343,6 @@ export default function AdminPage() {
     failures: <FailedNotifications />,
   }[activePage]
 
-  if (!loggedIn) return <AdminLogin onLogin={() => setLoggedIn(true)} />
-
   if (isMobile) {
     return (
       <div className="min-h-screen pb-18" style={{ background: '#FAFAF7', fontFamily: 'Pretendard, -apple-system, sans-serif' }}>
@@ -427,11 +356,11 @@ export default function AdminPage() {
               <p className="text-xs" style={{ color: '#9A9A9A' }}>관리자</p>
             </div>
           </div>
-          <button onClick={() => setLoggedIn(false)}
+          <LogoutButton
             className="flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium"
             style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#5B5B5B' }}>
             <Icon name="logout" size={13} />로그아웃
-          </button>
+          </LogoutButton>
         </div>
         <div className="p-4">{content}</div>
         <BottomTabs nav={nav} activePage={activePage} setActivePage={setActivePage} />
@@ -444,7 +373,6 @@ export default function AdminPage() {
       <SidebarNav
         nav={nav} activePage={activePage} setActivePage={setActivePage}
         sidebarOpen={sidebarOpen} setSidebarOpen={setSidebarOpen}
-        onLogout={() => setLoggedIn(false)}
       />
       <main className="flex-1 min-w-0 p-7 lg:p-9">{content}</main>
     </div>
