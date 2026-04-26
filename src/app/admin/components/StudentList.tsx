@@ -1,8 +1,46 @@
 'use client'
 
-import { useState, useMemo } from 'react'
-import { STUDENTS, GRADES, CLASSROOMS, PARENT_ROLES } from '../lib/mockData'
-import type { Student, ParentInfo } from '../lib/mockData'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+
+// 보호자 역할 드롭다운 옵션 — DB에 별도 컬럼이 없으므로 UI 상수로만 사용.
+// "엄마/아빠/할머니" 외 임의 입력은 PARENT_ROLES[0]로 정규화돼 저장됨.
+const PARENT_ROLES = ['엄마', '아빠', '할머니'] as const
+
+// API 응답 형태 — /api/admin/students 라우트와 1:1 매칭.
+// phone_last4는 DB의 generated column이라 클라이언트에서 직접 만들지 않고 응답에서만 받는다.
+type ParentRow = {
+  id: string
+  name: string | null
+  phone: string
+  phone_last4: string
+  is_primary: boolean
+}
+
+type StudentRow = {
+  id: string
+  academy_id: string
+  name: string
+  is_active: boolean
+  created_at: string
+  parents: ParentRow[]
+}
+
+// 모달이 다루는 학부모 입력 폼 형태.
+// id가 옵셔널인 이유: 새로 추가된 행은 아직 DB id가 없고, 저장 시 PATCH/POST 본문에는 id를 넣지 않아도 됨.
+type ParentDraft = {
+  id?: string
+  name: string
+  phone: string
+  phone_last4: string
+  is_primary: boolean
+}
+
+type StudentDraft = {
+  id?: string
+  name: string
+  is_active: boolean
+  parents: ParentDraft[]
+}
 
 function Icon({ name, size = 16, strokeWidth = 1.7 }: { name: string; size?: number; strokeWidth?: number }) {
   const paths: Record<string, React.ReactNode> = {
@@ -11,7 +49,6 @@ function Icon({ name, size = 16, strokeWidth = 1.7 }: { name: string; size?: num
     edit: <path d="M4 20L4 16L16 4L20 8L8 20Z"/>,
     trash: <><path d="M4 7H20"/><path d="M6 7L7 20H17L18 7"/><path d="M9 7V4H15V7"/></>,
     x: <><path d="M6 6L18 18"/><path d="M18 6L6 18"/></>,
-    chevronDown: <path d="M6 9l6 6 6-6"/>,
   }
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -42,9 +79,14 @@ function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) =>
   )
 }
 
-type ParentDraft = Omit<ParentInfo, 'student_id'>
+// created_at(timestamptz ISO) → "YYYY.MM" 표시 형식.
+// DB 스키마엔 별도 등록월 컬럼이 없어 created_at에서 파생.
+function formatJoined(iso: string): string {
+  const d = new Date(iso)
+  return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}`
+}
 
-function ParentRow({ parent, onUpdate, onRemove, onSetPrimary, canRemove }: {
+function ParentRowEditor({ parent, onUpdate, onRemove, onSetPrimary, canRemove }: {
   parent: ParentDraft
   onUpdate: (patch: Partial<ParentDraft>) => void
   onRemove: () => void
@@ -54,7 +96,7 @@ function ParentRow({ parent, onUpdate, onRemove, onSetPrimary, canRemove }: {
   return (
     <div className="flex gap-2.5 items-start p-3 rounded-xl"
       style={{ border: `1px solid ${parent.is_primary ? '#141414' : '#EAEAE4'}`, background: parent.is_primary ? '#F2F2EC' : '#fff' }}>
-      <select value={PARENT_ROLES.includes(parent.name) ? parent.name : PARENT_ROLES[0]}
+      <select value={(PARENT_ROLES as readonly string[]).includes(parent.name) ? parent.name : PARENT_ROLES[0]}
         onChange={e => onUpdate({ name: e.target.value })}
         className="h-10 rounded-lg px-2 text-sm cursor-pointer outline-none flex-shrink-0"
         style={{ width: 92, border: '1px solid #EAEAE4', background: '#fff', color: '#141414', fontFamily: 'inherit' }}>
@@ -85,18 +127,32 @@ function ParentRow({ parent, onUpdate, onRemove, onSetPrimary, canRemove }: {
   )
 }
 
-type StudentDraft = Omit<Student, 'id' | 'academy_id' | 'parents'> & { parents: ParentDraft[] }
-
-function StudentModal({ student, onClose, onSave, onDelete }: {
-  student: Student | null
+function StudentModal({ student, onClose, onSave, onDelete, busy }: {
+  student: StudentRow | null
   onClose: () => void
-  onSave: (draft: StudentDraft & { id?: string }) => void
-  onDelete: (s: Student) => void
+  onSave: (draft: StudentDraft) => Promise<void>
+  onDelete: (s: StudentRow) => Promise<void>
+  busy: boolean
 }) {
-  const [form, setForm] = useState<StudentDraft & { id?: string }>(() =>
+  const [form, setForm] = useState<StudentDraft>(() =>
     student
-      ? { ...student, parents: student.parents.map(p => ({ ...p })) }
-      : { name: '', grade: GRADES[0], classroom: CLASSROOMS[0], parents: [{ id: 'tmp-0', name: '엄마', phone: '', phone_last4: '', is_primary: true }], is_active: true, joined: '2026.04' }
+      ? {
+          id: student.id,
+          name: student.name,
+          is_active: student.is_active,
+          parents: student.parents.map(p => ({
+            id: p.id,
+            name: p.name ?? PARENT_ROLES[0],
+            phone: p.phone,
+            phone_last4: p.phone_last4,
+            is_primary: p.is_primary,
+          })),
+        }
+      : {
+          name: '',
+          is_active: true,
+          parents: [{ name: PARENT_ROLES[0], phone: '', phone_last4: '', is_primary: true }],
+        },
   )
 
   const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => setForm(prev => ({ ...prev, [k]: v }))
@@ -110,7 +166,7 @@ function StudentModal({ student, onClose, onSave, onDelete }: {
 
   const addParent = () => setForm(prev => ({
     ...prev,
-    parents: [...prev.parents, { id: `tmp-${prev.parents.length}`, name: PARENT_ROLES[prev.parents.length] ?? '보호자', phone: '', phone_last4: '', is_primary: false }],
+    parents: [...prev.parents, { name: PARENT_ROLES[prev.parents.length] ?? PARENT_ROLES[0], phone: '', phone_last4: '', is_primary: false }],
   }))
 
   const removeParent = (idx: number) => setForm(prev => {
@@ -124,12 +180,12 @@ function StudentModal({ student, onClose, onSave, onDelete }: {
     parents: prev.parents.map((p, i) => ({ ...p, is_primary: i === idx })),
   }))
 
-  const canSave = Boolean(form.name) && form.parents.length > 0 && form.parents.every(p => p.phone && p.phone_last4.length === 4)
+  const canSave = Boolean(form.name.trim()) && form.parents.length > 0 && form.parents.every(p => p.phone && p.phone_last4.length === 4)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-5"
       style={{ background: 'rgba(10,10,10,0.45)' }}
-      onClick={onClose}>
+      onClick={busy ? undefined : onClose}>
       <div className="w-full max-w-lg rounded-2xl flex flex-col"
         style={{ background: '#fff', border: '1px solid #EAEAE4', boxShadow: '0 30px 80px -10px rgba(0,0,0,0.25)', maxHeight: '90vh' }}
         onClick={e => e.stopPropagation()}>
@@ -138,36 +194,18 @@ function StudentModal({ student, onClose, onSave, onDelete }: {
             <p className="text-xs font-semibold" style={{ color: '#9A9A9A' }}>{student ? '학생 정보 수정' : '새 학생 등록'}</p>
             <p className="text-xl font-bold mt-1" style={{ color: '#141414' }}>{student ? student.name : '신규 학생'}</p>
           </div>
-          <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-lg"
-            style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#9A9A9A' }}>
+          <button onClick={onClose} disabled={busy} className="w-8 h-8 flex items-center justify-center rounded-lg"
+            style={{ background: 'transparent', border: 'none', cursor: busy ? 'not-allowed' : 'pointer', color: '#9A9A9A' }}>
             <Icon name="x" size={18} />
           </button>
         </div>
 
         <div className="p-6 overflow-y-auto flex-1">
-          <div className="grid grid-cols-2 gap-3.5">
-            <div>
-              <label className="block text-xs font-semibold mb-1.5" style={{ color: '#5B5B5B' }}>이름</label>
-              <input value={form.name} onChange={e => set('name', e.target.value)}
-                className="w-full h-10 rounded-lg px-3 text-sm outline-none"
-                style={{ border: '1px solid #EAEAE4', color: '#141414', boxSizing: 'border-box' }} />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold mb-1.5" style={{ color: '#5B5B5B' }}>학년</label>
-              <select value={form.grade} onChange={e => set('grade', e.target.value)}
-                className="w-full h-10 rounded-lg px-3 text-sm cursor-pointer outline-none"
-                style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414', fontFamily: 'inherit' }}>
-                {GRADES.map(g => <option key={g} value={g}>{g}</option>)}
-              </select>
-            </div>
-            <div className="col-span-2">
-              <label className="block text-xs font-semibold mb-1.5" style={{ color: '#5B5B5B' }}>반</label>
-              <select value={form.classroom} onChange={e => set('classroom', e.target.value)}
-                className="w-full h-10 rounded-lg px-3 text-sm cursor-pointer outline-none"
-                style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414', fontFamily: 'inherit' }}>
-                {CLASSROOMS.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
+          <div>
+            <label className="block text-xs font-semibold mb-1.5" style={{ color: '#5B5B5B' }}>이름</label>
+            <input value={form.name} onChange={e => set('name', e.target.value)}
+              className="w-full h-10 rounded-lg px-3 text-sm outline-none"
+              style={{ border: '1px solid #EAEAE4', color: '#141414', boxSizing: 'border-box' }} />
           </div>
 
           <div className="mt-5 pt-5" style={{ borderTop: '1px solid #F2F2EC' }}>
@@ -184,7 +222,7 @@ function StudentModal({ student, onClose, onSave, onDelete }: {
             </div>
             <div className="flex flex-col gap-2.5">
               {form.parents.map((p, i) => (
-                <ParentRow key={p.id ?? i} parent={p}
+                <ParentRowEditor key={p.id ?? `new-${i}`} parent={p}
                   onUpdate={patch => updateParent(i, patch)}
                   onRemove={() => removeParent(i)}
                   onSetPrimary={() => setPrimary(i)}
@@ -208,19 +246,19 @@ function StudentModal({ student, onClose, onSave, onDelete }: {
         <div className="flex items-center justify-between px-6 py-3.5 flex-shrink-0"
           style={{ borderTop: '1px solid #F2F2EC', background: '#F2F2EC' }}>
           {student ? (
-            <button onClick={() => onDelete(student)}
+            <button onClick={() => onDelete(student)} disabled={busy}
               className="flex items-center gap-1.5 h-9 px-3 rounded-lg text-sm"
-              style={{ background: '#fff', color: '#E5484D', border: '1px solid #EAEAE4', cursor: 'pointer', fontFamily: 'inherit' }}>
+              style={{ background: '#fff', color: '#E5484D', border: '1px solid #EAEAE4', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit', opacity: busy ? 0.5 : 1 }}>
               <Icon name="trash" size={13} />퇴원 처리
             </button>
           ) : <span />}
           <div className="flex gap-2">
-            <button onClick={onClose} className="h-9 px-4 rounded-lg text-sm font-medium"
-              style={{ background: 'transparent', color: '#5B5B5B', border: 'none', cursor: 'pointer', fontFamily: 'inherit' }}>취소</button>
-            <button onClick={() => onSave(form)} disabled={!canSave}
+            <button onClick={onClose} disabled={busy} className="h-9 px-4 rounded-lg text-sm font-medium"
+              style={{ background: 'transparent', color: '#5B5B5B', border: 'none', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>취소</button>
+            <button onClick={() => onSave(form)} disabled={!canSave || busy}
               className="h-9 px-4 rounded-lg text-sm font-semibold text-white disabled:opacity-50"
-              style={{ background: '#141414', border: 'none', cursor: canSave ? 'pointer' : 'not-allowed', fontFamily: 'inherit' }}>
-              {student ? '저장' : '등록'}
+              style={{ background: '#141414', border: 'none', cursor: canSave && !busy ? 'pointer' : 'not-allowed', fontFamily: 'inherit' }}>
+              {busy ? '처리 중...' : student ? '저장' : '등록'}
             </button>
           </div>
         </div>
@@ -230,50 +268,131 @@ function StudentModal({ student, onClose, onSave, onDelete }: {
 }
 
 export default function StudentList() {
-  const [students, setStudents] = useState<Student[]>(() => STUDENTS.slice())
+  const [students, setStudents] = useState<StudentRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
-  const [classFilter, setClassFilter] = useState('all')
-  const [gradeFilter, setGradeFilter] = useState('all')
-  const [editing, setEditing] = useState<Student | null | { _new: true }>(null)
+  const [editing, setEditing] = useState<StudentRow | { _new: true } | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  // 목록 조회 — 마운트 시 / 데이터 변경 후 재호출.
+  // why: 등록/수정/삭제 후 자동 갱신을 위해 한 군데에 모아두고 onSave/onDelete 끝에 호출.
+  // setState는 모두 await 이후에만 호출 — useEffect에서 호출돼도 동기적 setState로 인한
+  // 캐스케이딩 렌더링이 발생하지 않도록 한다.
+  const reload = useCallback(async () => {
+    try {
+      const res = await fetch('/api/admin/students', { cache: 'no-store' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body?.error ?? `HTTP ${res.status}`)
+      }
+      const body = (await res.json()) as { students: StudentRow[] }
+      setStudents(body.students)
+      setLoadError(null)
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : '학생 목록을 불러오지 못했습니다')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  // 마운트 시 1회 로드. cancelled 플래그로 언마운트 후 setState를 막아 메모리 경고 방지.
+  // why: react-hooks/set-state-in-effect 규칙이 effect 본문에서 reload() 호출 자체를
+  //      "동기적 setState"로 간주하기 때문에 인라인 async IIFE로 풀어 작성한다.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/api/admin/students', { cache: 'no-store' })
+        if (cancelled) return
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}))
+          throw new Error(body?.error ?? `HTTP ${res.status}`)
+        }
+        const body = (await res.json()) as { students: StudentRow[] }
+        if (cancelled) return
+        setStudents(body.students)
+        setLoadError(null)
+      } catch (err) {
+        if (cancelled) return
+        setLoadError(err instanceof Error ? err.message : '학생 목록을 불러오지 못했습니다')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const filtered = useMemo(() => students.filter(s => {
-    if (classFilter !== 'all' && s.classroom !== classFilter) return false
-    if (gradeFilter !== 'all' && s.grade !== gradeFilter) return false
-    if (query) {
-      const q = query.toLowerCase()
-      if (s.name.toLowerCase().includes(q)) return true
-      return s.parents.some(p => p.phone.includes(q) || p.phone_last4.includes(q))
-    }
-    return true
-  }), [students, query, classFilter, gradeFilter])
+    if (!query) return true
+    const q = query.toLowerCase()
+    if (s.name.toLowerCase().includes(q)) return true
+    return s.parents.some(p => p.phone.includes(q) || p.phone_last4.includes(q))
+  }), [students, query])
 
-  const onSave = (draft: StudentDraft & { id?: string }) => {
-    if (draft.id && students.find(x => x.id === draft.id)) {
-      setStudents(prev => prev.map(x => x.id === draft.id ? { ...x, ...draft } as Student : x))
-    } else {
-      const newId = `S${String(students.length + 1).padStart(3, '0')}`
-      setStudents(prev => [{ ...draft, id: newId, academy_id: 'a-0001', parents: draft.parents.map(p => ({ ...p, student_id: newId })) } as Student, ...prev])
-    }
-    setEditing(null)
-  }
+  const onSave = async (draft: StudentDraft) => {
+    setSaving(true)
+    try {
+      // 학부모 페이로드 — DB의 phone_last4는 generated column이라 보내지 않는다.
+      const parents = draft.parents.map(p => ({
+        name: p.name,
+        phone: p.phone,
+        is_primary: p.is_primary,
+      }))
 
-  const onDelete = (s: Student) => {
-    if (confirm(`${s.name} 학생을 퇴원 처리(소프트 삭제)하시겠습니까?`)) {
-      setStudents(prev => prev.map(x => x.id === s.id ? { ...x, is_active: false } : x))
+      const isUpdate = Boolean(draft.id)
+      const url = isUpdate ? `/api/admin/students/${draft.id}` : '/api/admin/students'
+      const res = await fetch(url, {
+        method: isUpdate ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: draft.name.trim(),
+          is_active: draft.is_active,
+          parents,
+        }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body?.error ?? `HTTP ${res.status}`)
+      }
+      await reload()
       setEditing(null)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '저장에 실패했습니다')
+    } finally {
+      setSaving(false)
     }
   }
 
-  type StudentDraft = Omit<Student, 'id' | 'academy_id' | 'parents'> & { parents: Omit<ParentInfo, 'student_id'>[]; id?: string }
+  const onDelete = async (s: StudentRow) => {
+    if (!confirm(`${s.name} 학생을 퇴원 처리(소프트 삭제)하시겠습니까?`)) return
+    setSaving(true)
+    try {
+      const res = await fetch(`/api/admin/students/${s.id}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body?.error ?? `HTTP ${res.status}`)
+      }
+      await reload()
+      setEditing(null)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '퇴원 처리에 실패했습니다')
+    } finally {
+      setSaving(false)
+    }
+  }
 
-  const activeCount = students.filter(s => s.is_active).length
+  // GET 라우트가 is_active=true만 반환하므로 students는 곧 활동 학생.
+  const activeCount = students.length
 
   return (
     <div>
       <div className="flex items-end justify-between mb-5 flex-wrap gap-3">
         <div>
           <h2 className="text-2xl font-extrabold tracking-tight" style={{ color: '#141414' }}>학생 관리</h2>
-          <p className="text-sm mt-1" style={{ color: '#5B5B5B' }}>총 {students.length}명 · 활동 {activeCount}명</p>
+          <p className="text-sm mt-1" style={{ color: '#5B5B5B' }}>활동 {activeCount}명</p>
         </div>
         <button onClick={() => setEditing({ _new: true })}
           className="flex items-center gap-1.5 h-9 px-4 rounded-lg text-sm font-semibold text-white"
@@ -283,35 +402,28 @@ export default function StudentList() {
       </div>
 
       <div className="rounded-xl p-3.5 mb-4" style={{ background: '#fff', border: '1px solid #EAEAE4' }}>
-        <div className="grid gap-2.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
-          <div className="relative flex items-center">
-            <span className="absolute left-3 pointer-events-none" style={{ color: '#9A9A9A' }}><Icon name="search" size={14} /></span>
-            <input value={query} onChange={e => setQuery(e.target.value)}
-              placeholder="이름 · 연락처 · 뒷자리 검색"
-              className="w-full h-10 rounded-lg pl-9 pr-3 text-sm outline-none"
-              style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414' }} />
-          </div>
-          <select value={gradeFilter} onChange={e => setGradeFilter(e.target.value)}
-            className="h-10 rounded-lg px-3 text-sm cursor-pointer outline-none"
-            style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414', fontFamily: 'inherit' }}>
-            <option value="all">전체 학년</option>
-            {GRADES.map(g => <option key={g} value={g}>{g}</option>)}
-          </select>
-          <select value={classFilter} onChange={e => setClassFilter(e.target.value)}
-            className="h-10 rounded-lg px-3 text-sm cursor-pointer outline-none"
-            style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414', fontFamily: 'inherit' }}>
-            <option value="all">전체 반</option>
-            {CLASSROOMS.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
+        <div className="relative flex items-center">
+          <span className="absolute left-3 pointer-events-none" style={{ color: '#9A9A9A' }}><Icon name="search" size={14} /></span>
+          <input value={query} onChange={e => setQuery(e.target.value)}
+            placeholder="이름 · 연락처 · 뒷자리 검색"
+            className="w-full h-10 rounded-lg pl-9 pr-3 text-sm outline-none"
+            style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414' }} />
         </div>
       </div>
 
+      {loadError && (
+        <div className="rounded-xl p-3.5 mb-4 text-sm"
+          style={{ background: '#FDECEC', border: '1px solid rgba(229,72,77,0.2)', color: '#E5484D' }}>
+          학생 목록을 불러오지 못했습니다: {loadError}
+        </div>
+      )}
+
       <div className="rounded-xl overflow-hidden" style={{ background: '#fff', border: '1px solid #EAEAE4' }}>
         <div className="overflow-x-auto">
-          <table className="w-full" style={{ borderCollapse: 'collapse', fontSize: 14, minWidth: 820 }}>
+          <table className="w-full" style={{ borderCollapse: 'collapse', fontSize: 14, minWidth: 640 }}>
             <thead>
               <tr style={{ background: '#F2F2EC', textAlign: 'left' }}>
-                {[['학생', 220], ['학년', 80], ['반', 140], ['학부모 연락처', 220], ['상태', 80], ['등록일', 100], ['', 80]].map(([label, w]) => (
+                {[['학생', 220], ['학부모 연락처', 240], ['상태', 80], ['등록일', 100], ['', 80]].map(([label, w]) => (
                   <th key={label} className="uppercase tracking-widest"
                     style={{ padding: '12px 16px', fontSize: 12, color: '#5B5B5B', fontWeight: 600, minWidth: w, whiteSpace: 'nowrap' }}>
                     {label}
@@ -320,7 +432,13 @@ export default function StudentList() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map(s => {
+              {loading ? (
+                <tr><td colSpan={5} style={{ padding: '32px 16px', textAlign: 'center', color: '#9A9A9A' }}>불러오는 중...</td></tr>
+              ) : filtered.length === 0 ? (
+                <tr><td colSpan={5} style={{ padding: '32px 16px', textAlign: 'center', color: '#9A9A9A' }}>
+                  {students.length === 0 ? '등록된 학생이 없습니다. 우측 상단 [학생 등록]으로 추가하세요.' : '검색 결과가 없습니다'}
+                </td></tr>
+              ) : filtered.map(s => {
                 const primary = s.parents.find(p => p.is_primary) ?? s.parents[0]
                 const extra = s.parents.length - 1
                 return (
@@ -331,12 +449,10 @@ export default function StudentList() {
                         <span className="font-semibold" style={{ color: '#141414' }}>{s.name}</span>
                       </div>
                     </td>
-                    <td style={{ padding: '12px 16px', verticalAlign: 'middle', color: '#141414' }}>{s.grade}</td>
-                    <td style={{ padding: '12px 16px', verticalAlign: 'middle', color: '#141414' }}>{s.classroom}</td>
                     <td style={{ padding: '12px 16px', verticalAlign: 'middle' }}>
                       <div className="flex items-center gap-1.5 text-xs tabular-nums" style={{ fontSize: 13, color: '#141414' }}>
                         <span>{primary?.phone ?? '—'}</span>
-                        {primary && <span style={{ color: '#9A9A9A' }}>({primary.name})</span>}
+                        {primary?.name && <span style={{ color: '#9A9A9A' }}>({primary.name})</span>}
                       </div>
                       {extra > 0 && <p className="text-xs mt-0.5" style={{ color: '#9A9A9A' }}>+ {extra}명 더</p>}
                     </td>
@@ -346,7 +462,7 @@ export default function StudentList() {
                         {s.is_active ? '활동' : '퇴원'}
                       </span>
                     </td>
-                    <td className="tabular-nums text-sm" style={{ padding: '12px 16px', verticalAlign: 'middle', color: '#5B5B5B' }}>{s.joined}</td>
+                    <td className="tabular-nums text-sm" style={{ padding: '12px 16px', verticalAlign: 'middle', color: '#5B5B5B' }}>{formatJoined(s.created_at)}</td>
                     <td style={{ padding: '12px 16px', verticalAlign: 'middle' }}>
                       <button onClick={() => setEditing(s)}
                         className="flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium"
@@ -362,12 +478,11 @@ export default function StudentList() {
         </div>
       </div>
 
-      {editing && !('_new' in editing && editing._new) && (
-        <StudentModal student={editing as Student} onClose={() => setEditing(null)} onSave={onSave} onDelete={onDelete} />
-      )}
-      {editing && '_new' in editing && (editing as { _new: true })._new && (
-        <StudentModal student={null} onClose={() => setEditing(null)} onSave={onSave} onDelete={onDelete} />
-      )}
+      {editing && '_new' in editing ? (
+        <StudentModal student={null} onClose={() => setEditing(null)} onSave={onSave} onDelete={onDelete} busy={saving} />
+      ) : editing ? (
+        <StudentModal student={editing} onClose={() => setEditing(null)} onSave={onSave} onDelete={onDelete} busy={saving} />
+      ) : null}
     </div>
   )
 }

@@ -1,4 +1,7 @@
-export type AttendanceType = 'checkin' | 'checkout';
+// 'absent'는 결석 관리 탭에서 보강 메모와 함께 기록되는 보조 타입.
+// 등원/하원과 같은 enum에 두는 이유: attendance_logs 한 테이블에서
+// "그 날 그 학생의 출석 상태"를 단일 소스로 조회할 수 있게 하기 위함.
+export type AttendanceType = 'checkin' | 'checkout' | 'absent';
 
 export type NotificationStatus = 'pending' | 'sent' | 'failed' | 'retrying';
 

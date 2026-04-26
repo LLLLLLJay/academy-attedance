@@ -1,19 +1,15 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import {
-  NOTIFICATIONS, STUDENTS, TODAY_ATTENDANCE,
-  ABSENT_TODAY, CHECKED_IN_TODAY, CHECKED_OUT_TODAY,
-} from '../lib/mockData'
-import type { Student } from '../lib/mockData'
 import AttendanceTable from './AttendanceTable'
 import StudentList from './StudentList'
 import FailedNotifications from './FailedNotifications'
+import AbsenceManagement from './AbsenceManagement'
 import LogoutButton from './LogoutButton'
 
-type Page = 'dashboard' | 'records' | 'students' | 'failures'
+type Page = 'dashboard' | 'records' | 'students' | 'absences' | 'failures'
 
-const ACADEMY_NAME = '새벽별 학원'
+const ACADEMY_NAME = '엘 영어학원'
 
 // ─── SVG icon primitives ────────────────────────────────────────────────────
 
@@ -91,21 +87,100 @@ function StatCard({ label, sub, value, tone, iconName, pct }: {
   )
 }
 
-function AdminDashboard() {
-  const total = STUDENTS.filter(s => s.is_active).length
-  const inCount = CHECKED_IN_TODAY.length
-  const outCount = CHECKED_OUT_TODAY.length
-  const absentCount = ABSENT_TODAY.length
-  const failCount = NOTIFICATIONS.filter(n => n.status === 'failed' && !n.resolved).length
-  const retryCount = NOTIFICATIONS.filter(n => n.status === 'retrying' && !n.resolved).length
+// 미등원 학생 — /api/admin/absentees 응답 row.
+// 학년/반 등 부가 정보는 DB 스키마에 없어 id+name만 사용한다.
+type Absentee = { id: string; name: string }
+
+// 대시보드 요약 — /api/admin/dashboard 응답 형태와 1:1 매칭.
+// 카운트는 KST 기준 당일이며, recent는 당일이 아닌 최신 10건이다.
+type RecentLog = {
+  id: string
+  student_id: string
+  student_name: string
+  type: 'checkin' | 'checkout'
+  checked_at: string
+}
+type DashboardSummary = {
+  total_active_students: number
+  today_checkin_count: number
+  today_checkout_count: number
+  recent: RecentLog[]
+}
+
+// ISO timestamptz → 화면 표시용 "HH:MM" (브라우저 로컬 = 한국 사용자 KST).
+function formatTime(iso: string): string {
+  const d = new Date(iso)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+function AdminDashboard({ failCount, setActivePage }: { failCount: number; setActivePage: (p: Page) => void }) {
+  // 미등원 학생은 Supabase에서 실시간 조회 (당일 checkin 기록 없는 활성 학생).
+  // why: 상세 리스트는 결석 관리 탭이 담당하고 대시보드에서는 카운트(StatCard)와
+  //      알림 배너만 보여주므로 loading/error 별도 표시 없이 카운트만 보관한다.
+  //      실패 시에도 0명으로 표시되며, 사용자에겐 결석 관리 탭에서 정확한 정보가 노출된다.
+  const [absentees, setAbsentees] = useState<Absentee[]>([])
+
+  // 대시보드 요약(카운트 + 최근 활동)은 별도 API에서 한 번에 받아와 round-trip을 절감한다.
+  // 미등원 카드는 별도 endpoint를 유지 — KST 경계 + students 안티조인이 카운트 쿼리와 다르고,
+  // 이미 안정화된 absentees API를 그대로 재사용하는 편이 변경 범위를 줄인다.
+  const [summary, setSummary] = useState<DashboardSummary | null>(null)
+  const [summaryError, setSummaryError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/api/admin/absentees', { cache: 'no-store' })
+        if (cancelled || !res.ok) return
+        const body = (await res.json()) as { absentees: Absentee[] }
+        if (cancelled) return
+        setAbsentees(body.absentees)
+      } catch {
+        // 카운트 조회 실패는 치명적이지 않음 — 0명으로 두고 결석 관리 탭으로 유도.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/api/admin/dashboard', { cache: 'no-store' })
+        if (cancelled) return
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}))
+          throw new Error(body?.error ?? `HTTP ${res.status}`)
+        }
+        const body = (await res.json()) as DashboardSummary
+        if (cancelled) return
+        setSummary(body)
+        setSummaryError(null)
+      } catch (err) {
+        if (cancelled) return
+        setSummaryError(err instanceof Error ? err.message : '대시보드 정보를 불러오지 못했습니다')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const total = summary?.total_active_students ?? 0
+  const inCount = summary?.today_checkin_count ?? 0
+  const outCount = summary?.today_checkout_count ?? 0
+  const absentCount = absentees.length
+  const recent = summary?.recent ?? []
 
   const now = new Date()
   const dateStr = `${now.getFullYear()}년 ${now.getMonth() + 1}월 ${now.getDate()}일 ${['일','월','화','수','목','금','토'][now.getDay()]}요일`
 
-  const recent = [...TODAY_ATTENDANCE]
-    .filter(s => s.inTime)
-    .sort((a, b) => ((b.outTime ?? b.inTime ?? '') > (a.outTime ?? a.inTime ?? '') ? 1 : -1))
-    .slice(0, 8)
+  // total / inCount이 0일 때 NaN%가 표시되지 않도록 분모를 보정 — 로딩 직후 1프레임 동안 표시.
+  const inPct = total > 0 ? Math.round((inCount / total) * 100) : 0
+  const outPct = inCount > 0 ? Math.round((outCount / inCount) * 100) : 0
+  const absentPct = total > 0 ? Math.round((absentCount / total) * 100) : 0
 
   return (
     <div>
@@ -117,81 +192,74 @@ function AdminDashboard() {
       </div>
 
       {absentCount > 0 && (
-        <div className="flex items-center gap-3.5 rounded-xl p-3.5 mb-5"
-          style={{ background: '#FDECEC', border: '1px solid rgba(229,72,77,0.2)' }}>
+        // 클릭 시 "결석 관리" 탭으로 이동 — 카드 리스트는 결석 관리 페이지로 통합되었기에
+        // 대시보드에서는 알림과 진입 동선만 남긴다. (button 사용으로 키보드 접근성도 확보)
+        <button
+          onClick={() => setActivePage('absences')}
+          className="w-full flex items-center gap-3.5 rounded-xl p-3.5 mb-5 text-left"
+          style={{
+            background: '#FDECEC', border: '1px solid rgba(229,72,77,0.2)',
+            cursor: 'pointer', fontFamily: 'inherit',
+          }}>
           <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
             style={{ background: '#E5484D', color: '#fff' }}>
             <Icon name="alert" size={16} />
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-sm font-bold" style={{ color: '#E5484D' }}>미등원 학생 {absentCount}명</p>
-            <p className="text-xs mt-0.5" style={{ color: '#5B5B5B' }}>수업 시작 후 미등원 학생이 있습니다. 부모님께 확인 필요</p>
+            <p className="text-xs mt-0.5" style={{ color: '#5B5B5B' }}>결석 관리 탭에서 보강 메모를 기록하세요 →</p>
           </div>
-        </div>
+        </button>
       )}
 
       <div className="grid gap-3.5 mb-6" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
-        <StatCard label="등원 완료" sub={`전체 ${total}명 중`} value={inCount} tone="warm" iconName="doorIn" pct={Math.round(inCount / total * 100)} />
-        <StatCard label="하원 완료" sub="등원한 학생 중" value={outCount} tone="cool" iconName="doorOut" pct={Math.round(outCount / Math.max(inCount, 1) * 100)} />
-        <StatCard label="미등원" sub="수업 시작 후" value={absentCount} tone="danger" iconName="alert" pct={Math.round(absentCount / total * 100)} />
-        <StatCard label="발송 실패" sub={retryCount > 0 ? `재시도 중 ${retryCount}건` : '미해결 (3회 실패)'} value={failCount} tone="warn" iconName="bell" pct={null} />
+        <StatCard label="등원 완료" sub={`전체 ${total}명 중`} value={inCount} tone="warm" iconName="doorIn" pct={inPct} />
+        <StatCard label="하원 완료" sub="등원한 학생 중" value={outCount} tone="cool" iconName="doorOut" pct={outPct} />
+        <StatCard label="미등원" sub="수업 시작 후" value={absentCount} tone="danger" iconName="alert" pct={absentPct} />
+        <StatCard label="발송 실패" sub="미해결 (3회 실패)" value={failCount} tone="warn" iconName="bell" pct={null} />
       </div>
 
-      <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))' }}>
-        <div className="rounded-xl overflow-hidden" style={{ background: '#fff', border: '1px solid #EAEAE4' }}>
-          <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid #F2F2EC' }}>
-            <div>
-              <p className="text-sm font-bold" style={{ color: '#141414' }}>최근 체크인/아웃</p>
-              <p className="text-xs mt-0.5" style={{ color: '#9A9A9A' }}>실시간 업데이트</p>
-            </div>
+      {/*
+        과거의 2분할 그리드(최근 활동 + 미등원 학생 카드)에서 미등원 카드를 제거.
+        why: 미등원/결석 관리는 신규 "결석 관리" 탭으로 통합 — 대시보드는 요약 카드와
+              알림 배너만 남기고, 자세한 리스트와 메모 입력은 전용 탭에서 처리한다.
+      */}
+      <div className="rounded-xl overflow-hidden" style={{ background: '#fff', border: '1px solid #EAEAE4' }}>
+        <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid #F2F2EC' }}>
+          <div>
+            <p className="text-sm font-bold" style={{ color: '#141414' }}>최근 체크인/아웃</p>
+            <p className="text-xs mt-0.5" style={{ color: '#9A9A9A' }}>실시간 업데이트</p>
           </div>
-          {recent.map((s, i) => (
-            <div key={i} className="flex items-center gap-3 px-5 py-3"
+        </div>
+        {summaryError ? (
+          <p className="px-5 py-6 text-xs text-center" style={{ color: '#E5484D' }}>
+            최근 활동을 불러오지 못했습니다: {summaryError}
+          </p>
+        ) : summary === null ? (
+          <p className="px-5 py-6 text-xs text-center" style={{ color: '#9A9A9A' }}>불러오는 중...</p>
+        ) : recent.length === 0 ? (
+          <p className="px-5 py-6 text-xs text-center" style={{ color: '#9A9A9A' }}>
+            아직 출석 기록이 없습니다
+          </p>
+        ) : (
+          recent.map((r, i) => (
+            <div key={r.id} className="flex items-center gap-3 px-5 py-3"
               style={{ borderBottom: i < recent.length - 1 ? '1px solid #F2F2EC' : 'none' }}>
-              <Avatar name={s.name} kind={s.status === 'out' ? 'cool' : 'warm'} size={36} />
+              <Avatar name={r.student_name} kind={r.type === 'checkout' ? 'cool' : 'warm'} size={36} />
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold" style={{ color: '#141414' }}>{s.name}</p>
-                <p className="text-xs mt-0.5" style={{ color: '#9A9A9A' }}>{s.grade} · {s.classroom}</p>
+                <p className="text-sm font-semibold" style={{ color: '#141414' }}>{r.student_name}</p>
+                <p className="text-xs mt-0.5" style={{ color: '#9A9A9A' }}>
+                  {r.type === 'checkout' ? '하원' : '등원'}
+                </p>
               </div>
               <div className="text-right">
-                <p className="text-xs font-bold tabular-nums" style={{ color: s.status === 'out' ? '#2B6CFF' : '#FF6B35' }}>
-                  {s.status === 'out' ? `하원 ${s.outTime}` : `등원 ${s.inTime}`}
-                </p>
-                <p className="text-xs tabular-nums mt-0.5" style={{ color: '#9A9A9A' }}>
-                  {s.status === 'out' ? `등원 ${s.inTime}` : '수업 중'}
+                <p className="text-xs font-bold tabular-nums" style={{ color: r.type === 'checkout' ? '#2B6CFF' : '#FF6B35' }}>
+                  {formatTime(r.checked_at)}
                 </p>
               </div>
             </div>
-          ))}
-        </div>
-
-        <div className="rounded-xl overflow-hidden" style={{ background: '#fff', border: '1px solid #EAEAE4' }}>
-          <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid #F2F2EC' }}>
-            <div>
-              <p className="text-sm font-bold" style={{ color: '#141414' }}>미등원 학생</p>
-              <p className="text-xs mt-0.5" style={{ color: '#9A9A9A' }}>{absentCount}명 · 확인 필요</p>
-            </div>
-          </div>
-          {(ABSENT_TODAY as (typeof ABSENT_TODAY[0] & Student)[]).slice(0, 6).map((s, i) => (
-            <div key={i} className="flex items-center gap-3 px-5 py-3"
-              style={{ borderBottom: i < Math.min((ABSENT_TODAY as unknown[]).length - 1, 5) ? '1px solid #F2F2EC' : 'none' }}>
-              <Avatar name={s.name} kind="neutral" size={36} />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold" style={{ color: '#141414' }}>{s.name}</p>
-                <p className="text-xs mt-0.5" style={{ color: '#9A9A9A' }}>{s.grade} · {s.classroom}</p>
-              </div>
-              <button className="flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium"
-                style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414' }}>
-                <Icon name="phone" size={12} />연락
-              </button>
-            </div>
-          ))}
-          {(ABSENT_TODAY as unknown[]).length > 6 && (
-            <p className="text-center text-xs py-3 cursor-pointer" style={{ color: '#9A9A9A', borderTop: '1px solid #F2F2EC' }}>
-              외 {(ABSENT_TODAY as unknown[]).length - 6}명 더보기 →
-            </p>
-          )}
-        </div>
+          ))
+        )}
       </div>
     </div>
   )
@@ -327,19 +395,40 @@ export default function AdminPage() {
     return () => window.removeEventListener('resize', check)
   }, [])
 
-  const failBadge = NOTIFICATIONS.filter(n => n.status === 'failed' && !n.resolved).length
+  // 사이드바 뱃지 + 대시보드 카드 모두에서 쓰는 발송 실패 건수.
+  // why: 두 컴포넌트가 각자 fetch하면 동일 endpoint를 중복 호출하므로 부모에서 한 번만 조회.
+  const [failBadge, setFailBadge] = useState(0)
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/api/admin/notifications/failed', { cache: 'no-store' })
+        if (!res.ok || cancelled) return
+        const body = (await res.json()) as { notifications: { id: string }[] }
+        if (cancelled) return
+        setFailBadge(body.notifications.length)
+      } catch {
+        // 뱃지 조회 실패는 치명적이지 않음 — 0으로 두고 사용자에게 알리지 않는다.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const nav: NavItem[] = [
     { id: 'dashboard', label: '대시보드', iconName: 'dashboard' },
     { id: 'records', label: '출석 기록', iconName: 'list' },
     { id: 'students', label: '학생 관리', iconName: 'users' },
+    { id: 'absences', label: '결석 관리', iconName: 'alert' },
     { id: 'failures', label: '발송 실패', iconName: 'bell', badge: failBadge },
   ]
 
   const content = {
-    dashboard: <AdminDashboard />,
+    dashboard: <AdminDashboard failCount={failBadge} setActivePage={setActivePage} />,
     records: <AttendanceTable />,
     students: <StudentList />,
+    absences: <AbsenceManagement />,
     failures: <FailedNotifications />,
   }[activePage]
 

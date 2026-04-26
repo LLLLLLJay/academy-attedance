@@ -7,9 +7,36 @@ import SelectScreen from './SelectScreen'
 import DoneScreen from './DoneScreen'
 import NotFoundScreen from './NotFoundScreen'
 import CooldownScreen from './CooldownScreen'
-import { findByPhoneLast4 } from '../lib/phoneDB'
-import { ACADEMY_NAME, COOLDOWN_MS, COUNTDOWN_SECONDS, PIN_MASKING } from '../lib/tokens'
+import { ACADEMY_NAME, COUNTDOWN_SECONDS, PIN_MASKING, TOKENS } from '../lib/tokens'
 import type { CooldownInfo, KioskMatch, KioskStudent, Mode, Screen } from '../lib/types'
+
+// ── 타입: /api/attendance 응답 ────────────────────────────────────
+//
+// 라우트가 status 200으로 비즈니스 분기 응답을 모두 돌려주는 정책을 따른다.
+// (CLAUDE.md / route.ts 상단 JSDoc 참조)
+// 클라이언트는 res.ok 체크 후 body.error 필드 유무·값으로 분기한다.
+type AttendanceSuccess = {
+  success: true
+  student: { name: string; type: 'checkin' | 'checkout'; checked_at: string }
+}
+// error는 라우트가 돌려주는 모든 코드를 리터럴 union으로 나열한다.
+// why: 'string' 타입을 한 곳이라도 끼우면 TS가 'MULTIPLE'/'COOLDOWN' 같은
+//      개별 리터럴로 좁히지 못해 분기에서 students/student 같은 속성 접근이 막힌다.
+type AttendanceResponse =
+  | AttendanceSuccess
+  | { error: 'MULTIPLE'; students: { id: string; name: string }[] }
+  | { error: 'COOLDOWN'; student: { name: string }; remainMin: number }
+  | { error: 'NOT_FOUND' }
+  | { error: 'INVALID_PHONE' }
+  | { error: 'INVALID_TYPE' }
+  | { error: 'INVALID_JSON' }
+  | { error: 'MISSING_ACADEMY' }
+  | { error: 'DB_ERROR'; detail?: string }
+
+// 키오스크 모드 ↔ API enum 매핑.
+// why: UI는 짧은 'in'/'out'을 쓰지만 API/DB enum은 'checkin'/'checkout'.
+const modeToType = (m: Mode): 'checkin' | 'checkout' =>
+  m === 'in' ? 'checkin' : 'checkout'
 
 export default function KioskApp() {
   const [screen, setScreen] = useState<Screen>('main')
@@ -21,9 +48,9 @@ export default function KioskApp() {
   const [countdown, setCountdown] = useState(COUNTDOWN_SECONDS)
   const [scale, setScale] = useState(1)
 
-  // 동일 학생+동일 타입의 마지막 처리 시각을 메모리에 저장 (5분 쿨다운 판정).
-  // 프로덕션: attendance_logs 테이블에서 최근 5분 내 동일 조합 조회로 교체.
-  const cooldownRef = useRef<Record<string, number>>({})
+  // 동시 키 입력으로 동일한 4자리에 대해 두 번 POST 나가는 것을 막기 위한 가드.
+  // why: setTimeout(260) 사이에 빠른 추가 입력이 들어오면 race가 날 수 있음.
+  const submittingRef = useRef(false)
 
   const resetToMain = useCallback(() => {
     setScreen('main')
@@ -31,6 +58,7 @@ export default function KioskApp() {
     setMatches([])
     setCurrentStudent(null)
     setCooldownInfo(null)
+    submittingRef.current = false
   }, [])
 
   useEffect(() => {
@@ -58,27 +86,86 @@ export default function KioskApp() {
     const compute = () => {
       const sx = window.innerWidth / 1280
       const sy = window.innerHeight / 800
-      setScale(Math.min(sx, sy, 1))
+      // 화면을 letterbox 없이 채운다. 비율이 다른 기기에서는 일부 가장자리가 잘릴 수 있다.
+      setScale(Math.max(sx, sy))
     }
     compute()
     window.addEventListener('resize', compute)
     return () => window.removeEventListener('resize', compute)
   }, [])
 
-  const checkCooldownMinutes = (studentName: string, type: Mode): number | null => {
-    const key = `${studentName}::${type}`
-    const last = cooldownRef.current[key]
-    if (last && Date.now() - last < COOLDOWN_MS) {
-      return Math.ceil((COOLDOWN_MS - (Date.now() - last)) / 60_000)
-    }
-    return null
-  }
+  // ── /api/attendance 호출 헬퍼 ─────────────────────────────────────
+  //
+  // phone_last4 + type (+ 선택 시 student_id) 만 실어 POST.
+  // academy_id는 서버 라우트가 env/DB로 보강하므로 클라이언트가 보내지 않는다.
+  // why: 태블릿엔 로그인이 없어 학원 식별 정보 출처가 없음.
+  const callAttendance = useCallback(
+    async (phoneLast4: string, type: 'checkin' | 'checkout', studentId?: string) => {
+      const res = await fetch('/api/attendance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone_last4: phoneLast4,
+          type,
+          ...(studentId ? { student_id: studentId } : {}),
+        }),
+      })
+      // 본문은 항상 JSON. 비즈니스 분기 응답도 200이라서 res.ok로 검증 후 body로 분기.
+      const json = (await res.json().catch(() => null)) as AttendanceResponse | null
+      return { ok: res.ok, status: res.status, body: json }
+    },
+    [],
+  )
 
-  const commitAttendance = (student: KioskStudent) => {
-    cooldownRef.current[`${student.name}::${mode}`] = Date.now()
-    setCurrentStudent(student)
-    setScreen('done')
-  }
+  // ── 응답 분기 → 화면 전환 ─────────────────────────────────────────
+  //
+  // 4자리 첫 호출과 SelectScreen에서 학생 선택 후 두 번째 호출 모두 같은 분기를 탄다.
+  // why: 두 호출 모두 success/COOLDOWN/NOT_FOUND가 가능하고 분기 로직이 동일.
+  const handleResponse = useCallback(
+    (body: AttendanceResponse | null, ok: boolean) => {
+      if (!ok || !body) {
+        // 네트워크/서버 실패 → 사용자에겐 NOT_FOUND와 동일한 안내 화면으로.
+        // why: 태블릿에서 별도 에러 화면을 띄우면 학생이 당황 → "다시 시도" 흐름이 더 친절.
+        setScreen('notfound')
+        return
+      }
+      if ('success' in body && body.success) {
+        setCurrentStudent({ name: body.student.name })
+        setScreen('done')
+        return
+      }
+      if ('error' in body) {
+        if (body.error === 'MULTIPLE') {
+          // students[] 를 KioskMatch 형태로 매핑. parent 정보는 API에 없어 생략.
+          const next: KioskMatch[] = body.students.map((s) => ({
+            student: { id: s.id, name: s.name },
+          }))
+          setMatches(next)
+          setScreen('select')
+          return
+        }
+        if (body.error === 'COOLDOWN') {
+          setCooldownInfo({
+            student: { name: body.student.name },
+            remainMin: body.remainMin,
+          })
+          setScreen('cooldown')
+          return
+        }
+        if (body.error === 'NOT_FOUND') {
+          setScreen('notfound')
+          return
+        }
+        // INVALID_PHONE / INVALID_TYPE / DB_ERROR / MISSING_ACADEMY 등
+        // 사용자가 손쓸 수 없는 케이스도 우선 NOT_FOUND 화면으로 안내한다.
+        // why: 정확한 사유는 서버 로그로 보고, 아이는 "다시 누르세요" 메시지면 충분.
+        console.error('[kiosk] attendance error:', body)
+        setScreen('notfound')
+        return
+      }
+    },
+    [],
+  )
 
   const onPickMode = (m: Mode) => {
     setMode(m)
@@ -88,43 +175,49 @@ export default function KioskApp() {
 
   const onKey = (k: string) => {
     if (k === '⌫') {
-      setPin(p => p.slice(0, -1))
+      setPin((p) => p.slice(0, -1))
       return
     }
     if (pin.length >= 4) return
     const next = pin + k
     setPin(next)
     if (next.length === 4) {
-      setTimeout(() => {
-        const found = findByPhoneLast4(next)
-        if (found.length === 0) {
+      // 260ms 지연: 마지막 키 애니메이션이 끝난 뒤 화면 전환되도록 (UX).
+      setTimeout(async () => {
+        if (submittingRef.current) return
+        submittingRef.current = true
+        try {
+          const { ok, body } = await callAttendance(next, modeToType(mode))
+          handleResponse(body, ok)
+        } catch (err) {
+          console.error('[kiosk] attendance request failed:', err)
           setScreen('notfound')
-          return
-        }
-        if (found.length === 1) {
-          const remainMin = checkCooldownMinutes(found[0].student.name, mode)
-          if (remainMin) {
-            setCooldownInfo({ student: found[0].student, remainMin })
-            setScreen('cooldown')
-            return
-          }
-          commitAttendance(found[0].student)
-        } else {
-          setMatches(found)
-          setScreen('select')
+        } finally {
+          submittingRef.current = false
         }
       }, 260)
     }
   }
 
-  const onPickStudent = (match: KioskMatch) => {
-    const remainMin = checkCooldownMinutes(match.student.name, mode)
-    if (remainMin) {
-      setCooldownInfo({ student: match.student, remainMin })
-      setScreen('cooldown')
+  const onPickStudent = async (match: KioskMatch) => {
+    if (!match.student.id) {
+      // id가 없는 match는 mock 잔재 — 정상 흐름에선 발생하지 않지만 방어적으로 처리.
+      console.error('[kiosk] picked match without student.id', match)
+      setScreen('notfound')
       return
     }
-    commitAttendance(match.student)
+    if (submittingRef.current) return
+    submittingRef.current = true
+    try {
+      // 두 번째 호출: 같은 4자리 + 선택된 student_id로 단일 학생 확정.
+      const { ok, body } = await callAttendance(pin, modeToType(mode), match.student.id)
+      handleResponse(body, ok)
+    } catch (err) {
+      console.error('[kiosk] attendance pick request failed:', err)
+      setScreen('notfound')
+    } finally {
+      submittingRef.current = false
+    }
   }
 
   const backFromSelect = () => {
@@ -195,7 +288,7 @@ export default function KioskApp() {
   return (
     <div style={{
       width: '100vw', height: '100vh',
-      background: '#0a0a0a',
+      background: TOKENS.bg,
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       overflow: 'hidden',
     }}>

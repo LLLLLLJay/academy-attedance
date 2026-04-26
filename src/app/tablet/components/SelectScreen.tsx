@@ -82,10 +82,21 @@ function StudentRow({
         }}>{student.name.slice(-1)}</div>
         <div style={{ textAlign: 'left' }}>
           <div style={{ fontSize: 30, fontWeight: 700, letterSpacing: '-0.01em' }}>{student.name}</div>
-          <div style={{ fontSize: 17, color: TOKENS.inkSoft, marginTop: 2 }}>
-            {student.grade} · {student.classroom}
-            <span style={{ color: TOKENS.inkMute }}> · {parent.name}</span>
-          </div>
+          {/*
+            grade/classroom/parent 정보가 있으면 한 줄로 합쳐 보여준다.
+            하나도 없으면 (DB API 호출에서 student id+name만 받은 케이스) 줄 자체를 생략 →
+            mock 시절의 빈 ' · ' 자리만 남는 어색한 표시를 피한다.
+          */}
+          {(student.grade || student.classroom || parent?.name) && (
+            <div style={{ fontSize: 17, color: TOKENS.inkSoft, marginTop: 2 }}>
+              {[student.grade, student.classroom].filter(Boolean).join(' · ')}
+              {parent?.name && (
+                <span style={{ color: TOKENS.inkMute }}>
+                  {(student.grade || student.classroom) ? ' · ' : ''}{parent.name}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       </div>
       <div style={{

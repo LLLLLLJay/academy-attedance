@@ -52,23 +52,24 @@ export async function POST(request: Request) {
   // 문자열이 아니면 빈 문자열로 떨어뜨려 다음 검증 단계에서 일관되게 거른다.
   const phone_last4 = typeof body.phone_last4 === 'string' ? body.phone_last4 : '';
   const type = body.type;
-  const academy_id = typeof body.academy_id === 'string' ? body.academy_id : '';
+  const bodyAcademyId =
+    typeof body.academy_id === 'string' && body.academy_id.length > 0
+      ? body.academy_id
+      : '';
   // student_id는 옵셔널 — MULTIPLE 응답을 받은 클라이언트가 학생을 고른 뒤에만 넣어 보낸다.
   const student_id =
     typeof body.student_id === 'string' && body.student_id.length > 0
       ? body.student_id
       : undefined;
 
-  // 본문 형식 검증: 정확히 숫자 4자리인지 / type이 enum 값인지 / academy_id 존재 여부.
+  // 본문 형식 검증: 정확히 숫자 4자리인지 / type이 enum 값인지.
   // why: DB까지 가기 전에 잘못된 입력을 거절해 불필요한 쿼리·로그를 방지.
+  //      academy_id는 아래 단계에서 env/DB로 보강하므로 여기선 검증하지 않는다.
   if (!/^\d{4}$/.test(phone_last4)) {
     return NextResponse.json({ error: 'INVALID_PHONE' }, { status: 400 });
   }
   if (type !== 'checkin' && type !== 'checkout') {
     return NextResponse.json({ error: 'INVALID_TYPE' }, { status: 400 });
-  }
-  if (!academy_id) {
-    return NextResponse.json({ error: 'MISSING_ACADEMY' }, { status: 400 });
   }
 
   // 검증 통과 시점에 attendanceType을 enum 타입으로 고정 → 이후 DB insert에 그대로 사용 가능.
@@ -76,6 +77,59 @@ export async function POST(request: Request) {
 
   // 서버 컴포넌트/라우트 핸들러용 Supabase 클라이언트 생성 (쿠키 기반 세션 관리).
   const supabase = await createClient();
+
+  // ── 0b. academy_id 결정 (env → body → academies 첫 row) ──────
+  //
+  // 태블릿은 로그인이 없어 JWT/세션이 없고 body에 academy_id를 실어 보낼 출처도 없다.
+  // 그래서 서버에서 다음 우선순위로 보강한다:
+  //   1) NEXT_PUBLIC_ACADEMY_ID (운영에서 학원별로 박아 넣는 표준 경로)
+  //   2) body.academy_id (관리자/테스트 클라이언트가 명시적으로 넘긴 경우)
+  //   3) academies 테이블의 첫 row (단일 학원 운영 환경의 fallback)
+  // why: 4자리는 학원 간 우연히 겹칠 수 있어 academy_id 필터가 빠지면 다른 학원
+  //      학생이 잡혀 NOT_FOUND/MULTIPLE이 잘못 떨어지므로 반드시 1개로 결정해야 한다.
+  let academy_id = '';
+  let academySource: 'env' | 'body' | 'db' | 'none' = 'none';
+
+  const envAcademyId = process.env.NEXT_PUBLIC_ACADEMY_ID ?? '';
+  if (envAcademyId) {
+    academy_id = envAcademyId;
+    academySource = 'env';
+  } else if (bodyAcademyId) {
+    academy_id = bodyAcademyId;
+    academySource = 'body';
+  } else {
+    // env도 body도 없으면 DB에서 가장 오래된 학원 1개를 집어 사용한다 (단일 학원 가정).
+    const { data: firstAcademy, error: academyErr } = await supabase
+      .from('academies')
+      .select('id')
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (academyErr) {
+      return NextResponse.json(
+        { error: 'DB_ERROR', detail: academyErr.message },
+        { status: 500 },
+      );
+    }
+    if (firstAcademy?.id) {
+      academy_id = firstAcademy.id;
+      academySource = 'db';
+    }
+  }
+
+  // 디버깅용 로그 — 어디서 academy_id가 왔는지/실제 값이 무엇인지 확인.
+  // (배포 전에 제거하거나 NODE_ENV 체크로 감싸도 됨)
+  console.log('[attendance] academy_id resolved:', {
+    source: academySource,
+    academy_id,
+    bodyAcademyId,
+    envAcademyId,
+  });
+
+  if (!academy_id) {
+    // env/body/DB 어디에도 학원이 없으면 더 이상 진행 불가.
+    return NextResponse.json({ error: 'MISSING_ACADEMY' }, { status: 400 });
+  }
 
   // ── 1. phone_last4 → 후보 학생 ID 모으기 ─────────────────────
 
@@ -160,12 +214,14 @@ export async function POST(request: Request) {
   // 같은 학생의 같은 type 기록이 5분 이내에 1건이라도 있는지만 확인 → limit(1).
   // why: 존재 여부만 알면 되므로 전체 카운트나 풀 셀렉트는 불필요.
   //      checkin→checkout(혹은 반대)은 차단하지 않으므로 type 조건이 필수.
+  //      checked_at도 함께 가져오는 이유: 클라이언트(CooldownScreen)에 남은 분을 돌려주려고.
   const { data: recent, error: cooldownErr } = await supabase
     .from('attendance_logs')
-    .select('id')
+    .select('id, checked_at')
     .eq('student_id', target.id)
     .eq('type', attendanceType)
     .gte('checked_at', cooldownThreshold)
+    .order('checked_at', { ascending: false })
     .limit(1);
 
   if (cooldownErr) {
@@ -176,7 +232,21 @@ export async function POST(request: Request) {
   }
   if (recent && recent.length > 0) {
     // 5분 안에 같은 type 기록이 존재 → 중복 입력으로 판정해 거절.
-    return NextResponse.json({ error: 'COOLDOWN' }, { status: 200 });
+    // 화면에 "약 N분 후 다시" 안내를 띄우기 위해 학생명과 남은 분을 함께 돌려준다.
+    const lastCheckedMs = new Date(recent[0].checked_at!).getTime();
+    const elapsedMs = Date.now() - lastCheckedMs;
+    const remainMin = Math.max(
+      1,
+      Math.ceil((COOLDOWN_MINUTES * 60 * 1000 - elapsedMs) / 60_000),
+    );
+    return NextResponse.json(
+      {
+        error: 'COOLDOWN',
+        student: { name: target.name },
+        remainMin,
+      },
+      { status: 200 },
+    );
   }
 
   // ── 3. attendance_logs 기록 ──────────────────────────────────
@@ -209,8 +279,14 @@ export async function POST(request: Request) {
     );
   }
 
-  // ── 4. 알림 발송 큐(notification_logs)에 pending 적재 ──────────
-
+  // ── 4·5. 알림톡/SMS 발송 일시 비활성화 ──────────────────────────
+  //
+  // 카카오 알림톡/SMS 발송 기능을 임시로 꺼둔 상태.
+  // why: 솔라피 검수/운영 결정이 끝날 때까지 실제 발송을 막고,
+  //      "전송실패"가 관리자 페이지에 누적되지 않도록 notification_logs 적재 자체를 생략.
+  //      → 출석은 정상 기록되지만 알림은 보내지 않음 (학부모 통지 없음).
+  // 다시 켤 때: 아래 블록의 주석을 해제하면 됨 (parents 조회 / pending insert / /api/notify 호출).
+  /*
   // 해당 학생의 학부모 ID를 다시 조회.
   // why: 1단계에선 phone_last4 일치하는 부모만 가져왔지만,
   //      알림은 "그 학생의 모든 학부모"에게 가야 하므로 student_id 기준으로 새로 가져온다.
@@ -263,6 +339,7 @@ export async function POST(request: Request) {
   }).catch((err) => {
     console.error('[attendance] notify dispatch failed:', err);
   });
+  */
 
   // ── 6. 성공 응답 ────────────────────────────────────────────
 

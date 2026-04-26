@@ -97,7 +97,7 @@ notification_logs  알림톡 발송 상태 + 재시도 관리 (attempt_count 최
 ---
 
 ## 참고 문서
-- `PRD_v0.2.md` — 전체 기능 요구사항 + 엣지케이스
+- `PRD_v0.3.md` — 전체 기능 요구사항 + 엣지케이스
 - `SCHEMA.md` — Supabase 스키마 SQL + 핵심 쿼리
 - `ALIMTALK_TEMPLATE.md` — 솔라피 알림톡 템플릿 + 연동 가이드
 
