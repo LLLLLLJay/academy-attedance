@@ -5,9 +5,10 @@ import AttendanceTable from './AttendanceTable'
 import StudentList from './StudentList'
 import FailedNotifications from './FailedNotifications'
 import AbsenceManagement from './AbsenceManagement'
+import ClassManagement from './ClassManagement'
 import LogoutButton from './LogoutButton'
 
-type Page = 'dashboard' | 'records' | 'students' | 'absences' | 'failures'
+type Page = 'dashboard' | 'records' | 'students' | 'classes' | 'absences' | 'failures'
 
 const ACADEMY_NAME = '엘 영어학원'
 
@@ -25,6 +26,7 @@ function Icon({ name, size = 16, strokeWidth = 1.7 }: { name: string; size?: num
     alert: <><path d="M12 3L22 20H2Z"/><path d="M12 10v4"/><circle cx="12" cy="17" r=".8" fill="currentColor" stroke="none"/></>,
     doorIn: <><path d="M14 4h5v16h-5"/><path d="M4 12h10"/><path d="M10 7l4 5-4 5"/></>,
     doorOut: <><path d="M14 4h5v16h-5"/><path d="M4 12h10"/><path d="M8 7L4 12l4 5"/></>,
+    calendar: <><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4"/><path d="M16 3v4"/><path d="M3 10h18"/></>,
     phone: <path d="M5 4h4l2 5-3 2a10 10 0 0 0 5 5l2-3 5 2v4a1 1 0 0 1-1 1C10 20 4 14 4 5a1 1 0 0 1 1-1z"/>,
     eye: <><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></>,
     eyeOff: <><path d="M17.94 17.94A10 10 0 0 1 12 20c-7 0-10-8-10-8a18 18 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9 9 0 0 1 12 4c7 0 10 8 10 8a18 18 0 0 1-1 1.6"/><path d="M1 1l22 22"/></>,
@@ -102,6 +104,8 @@ type RecentLog = {
 }
 type DashboardSummary = {
   total_active_students: number
+  // 오늘 KST 요일에 수업이 있는 활성 학생 수 — 등원/미등원 % 계산의 분모.
+  today_expected_count: number
   today_checkin_count: number
   today_checkout_count: number
   recent: RecentLog[]
@@ -168,7 +172,7 @@ function AdminDashboard({ failCount, setActivePage }: { failCount: number; setAc
     }
   }, [])
 
-  const total = summary?.total_active_students ?? 0
+  const expected = summary?.today_expected_count ?? 0
   const inCount = summary?.today_checkin_count ?? 0
   const outCount = summary?.today_checkout_count ?? 0
   const absentCount = absentees.length
@@ -177,10 +181,12 @@ function AdminDashboard({ failCount, setActivePage }: { failCount: number; setAc
   const now = new Date()
   const dateStr = `${now.getFullYear()}년 ${now.getMonth() + 1}월 ${now.getDate()}일 ${['일','월','화','수','목','금','토'][now.getDay()]}요일`
 
-  // total / inCount이 0일 때 NaN%가 표시되지 않도록 분모를 보정 — 로딩 직후 1프레임 동안 표시.
-  const inPct = total > 0 ? Math.round((inCount / total) * 100) : 0
+  // 등원/미등원 % 분모는 today_expected_count(오늘 수업 있는 학생) 기준.
+  // why: 클래스 도입 후 "오늘 수업이 없는 학생"은 분모에서 빠져야 카드가 의미있어짐.
+  // 하원 %는 등원한 학생이 분모 — 등원 → 하원 자연스러운 흐름.
+  const inPct = expected > 0 ? Math.round((inCount / expected) * 100) : 0
   const outPct = inCount > 0 ? Math.round((outCount / inCount) * 100) : 0
-  const absentPct = total > 0 ? Math.round((absentCount / total) * 100) : 0
+  const absentPct = expected > 0 ? Math.round((absentCount / expected) * 100) : 0
 
   return (
     <div>
@@ -213,9 +219,9 @@ function AdminDashboard({ failCount, setActivePage }: { failCount: number; setAc
       )}
 
       <div className="grid gap-3.5 mb-6" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
-        <StatCard label="등원 완료" sub={`전체 ${total}명 중`} value={inCount} tone="warm" iconName="doorIn" pct={inPct} />
+        <StatCard label="등원 완료" sub={`오늘 수업 ${expected}명 중`} value={inCount} tone="warm" iconName="doorIn" pct={inPct} />
         <StatCard label="하원 완료" sub="등원한 학생 중" value={outCount} tone="cool" iconName="doorOut" pct={outPct} />
-        <StatCard label="미등원" sub="수업 시작 후" value={absentCount} tone="danger" iconName="alert" pct={absentPct} />
+        <StatCard label="미등원" sub={`오늘 수업 ${expected}명 중`} value={absentCount} tone="danger" iconName="alert" pct={absentPct} />
         <StatCard label="발송 실패" sub="미해결 (3회 실패)" value={failCount} tone="warn" iconName="bell" pct={null} />
       </div>
 
@@ -420,6 +426,7 @@ export default function AdminPage() {
     { id: 'dashboard', label: '대시보드', iconName: 'dashboard' },
     { id: 'records', label: '출석 기록', iconName: 'list' },
     { id: 'students', label: '학생 관리', iconName: 'users' },
+    { id: 'classes', label: '클래스 관리', iconName: 'calendar' },
     { id: 'absences', label: '결석 관리', iconName: 'alert' },
     { id: 'failures', label: '발송 실패', iconName: 'bell', badge: failBadge },
   ]
@@ -428,6 +435,7 @@ export default function AdminPage() {
     dashboard: <AdminDashboard failCount={failBadge} setActivePage={setActivePage} />,
     records: <AttendanceTable />,
     students: <StudentList />,
+    classes: <ClassManagement />,
     absences: <AbsenceManagement />,
     failures: <FailedNotifications />,
   }[activePage]

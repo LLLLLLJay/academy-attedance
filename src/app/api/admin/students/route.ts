@@ -24,6 +24,13 @@ type ParentResponse = {
   is_primary: boolean;
 };
 
+// 학생이 속한 클래스 — 화면에서 칩(chip)으로 노출하기 위해 id+name+weekdays까지 평탄화.
+type StudentClassResponse = {
+  id: string;
+  name: string;
+  weekdays: number[];
+};
+
 type StudentResponse = {
   id: string;
   academy_id: string;
@@ -31,6 +38,7 @@ type StudentResponse = {
   is_active: boolean;
   created_at: string;
   parents: ParentResponse[];
+  classes: StudentClassResponse[];
 };
 
 // POST 본문 형태 — 외부 입력은 unknown으로 받아 런타임 검증.
@@ -105,6 +113,37 @@ export async function GET() {
     parentsByStudent.set(p.student_id, list);
   }
 
+  // 클래스 소속 — student_classes + classes를 inner join으로 한 번에 조회.
+  // why: 학생 카드에서 "○○반 / 월수금" 같은 칩을 그리기 위함. 학원 외 클래스는 inner join에서 자연 제외.
+  const { data: classLinks, error: classLinksErr } = await supabase
+    .from('student_classes')
+    .select('student_id, classes!inner(id, name, weekdays, academy_id)')
+    .in('student_id', studentIds);
+
+  if (classLinksErr) {
+    return NextResponse.json(
+      { error: 'DB_ERROR', detail: classLinksErr.message },
+      { status: 500 },
+    );
+  }
+
+  type LinkRow = {
+    student_id: string;
+    classes:
+      | { id: string; name: string; weekdays: number[] | null; academy_id: string }
+      | { id: string; name: string; weekdays: number[] | null; academy_id: string }[]
+      | null;
+  };
+
+  const classesByStudent = new Map<string, StudentClassResponse[]>();
+  for (const raw of (classLinks ?? []) as LinkRow[]) {
+    const rel = Array.isArray(raw.classes) ? raw.classes[0] : raw.classes;
+    if (!rel || rel.academy_id !== claims.academy_id) continue;
+    const list = classesByStudent.get(raw.student_id) ?? [];
+    list.push({ id: rel.id, name: rel.name, weekdays: rel.weekdays ?? [] });
+    classesByStudent.set(raw.student_id, list);
+  }
+
   // 대표 연락처가 항상 첫 번째로 보이도록 정렬 — UI에서 primary를 우선 표시하기 편함.
   const result: StudentResponse[] = students.map((s) => ({
     id: s.id,
@@ -114,6 +153,9 @@ export async function GET() {
     created_at: s.created_at,
     parents: (parentsByStudent.get(s.id) ?? []).sort((a, b) =>
       a.is_primary === b.is_primary ? 0 : a.is_primary ? -1 : 1,
+    ),
+    classes: (classesByStudent.get(s.id) ?? []).sort((a, b) =>
+      a.name.localeCompare(b.name, 'ko'),
     ),
   }));
 
@@ -208,6 +250,8 @@ export async function POST(request: Request) {
     );
   }
 
+  // 신규 등록 직후엔 클래스 배정이 없으므로 빈 배열로 초기화.
+  // (클래스 배정은 ClassManagement 페이지에서 별도 흐름으로 처리)
   const created: StudentResponse = {
     id: student.id,
     academy_id: student.academy_id,
@@ -217,6 +261,7 @@ export async function POST(request: Request) {
     parents: insertedParents.sort((a, b) =>
       a.is_primary === b.is_primary ? 0 : a.is_primary ? -1 : 1,
     ),
+    classes: [],
   };
 
   return NextResponse.json({ student: created }, { status: 201 });

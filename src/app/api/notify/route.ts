@@ -48,26 +48,7 @@ type NotifyRequest = {
 //      그 타입을 직접 import하면 v2 내부 타입 노출이 많아져 유지보수 부담
 type ServerSupabase = Awaited<ReturnType<typeof createClient>>;
 
-export async function POST(_request: Request) {
-  // ── 알림톡/SMS 발송 일시 비활성화 ────────────────────────────
-  //
-  // 솔라피 호출/상태 갱신을 모두 건너뛰고 "비활성" 응답만 돌려준다.
-  // why: 외부 cron·수동 테스트 등이 이 라우트를 찔러도 notification_logs를
-  //      'failed'/'retrying'으로 갱신하지 않아 관리자 페이지에 "전송실패"가
-  //      쌓이지 않도록 함. /api/attendance 쪽에서도 이미 호출을 막아두었으나
-  //      이 가드를 함께 두어 어느 경로에서 들어오든 부작용이 없게 한다.
-  // 다시 켤 때: 아래 return을 지우고 그 밑의 `/* ... */` 블록 주석을 풀면 됨.
-  // (block-comment로 감싼 이유: 단순 early-return만 두면 그 뒤 코드가 unreachable로
-  //  남으면서도 타입 체크는 계속 돌아 supabase narrowing이 풀려 다수의 TS 에러가 발생함.)
-  return NextResponse.json({
-    success: true,
-    sent: 0,
-    retrying: 0,
-    failed: 0,
-    message: 'notifications disabled',
-  });
-
-  /*
+export async function POST(request: Request) {
   // ── 0. 본문 파싱 + 환경변수 검증 ──────────────────────────────
 
   // request.json() 실패 시 throw → 400으로 매핑.
@@ -281,7 +262,6 @@ export async function POST(_request: Request) {
 
   // 부분 실패 포함 모두 200 — 클라이언트(주로 cron)는 카운트로 상태 파악.
   return NextResponse.json({ success: true, ...summary });
-  */
 }
 
 // ─────────────────────────────────────────────────────────────

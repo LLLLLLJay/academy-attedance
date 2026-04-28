@@ -16,6 +16,10 @@ type ParentRow = {
   is_primary: boolean
 }
 
+// 클래스 칩 — /api/admin/students 응답에 포함되는 학생-클래스 평탄 배열.
+// 학생 카드/모달에서 "어느 반에 속해 있는지" 한눈에 보여주기 위함.
+type ClassChip = { id: string; name: string; weekdays: number[] }
+
 type StudentRow = {
   id: string
   academy_id: string
@@ -23,6 +27,7 @@ type StudentRow = {
   is_active: boolean
   created_at: string
   parents: ParentRow[]
+  classes: ClassChip[]
 }
 
 // 모달이 다루는 학부모 입력 폼 형태.
@@ -446,7 +451,29 @@ export default function StudentList() {
                     <td style={{ padding: '12px 16px', verticalAlign: 'middle' }}>
                       <div className="flex items-center gap-2.5">
                         <Avatar name={s.name} kind={s.is_active ? 'warm' : 'neutral'} size={32} />
-                        <span className="font-semibold" style={{ color: '#141414' }}>{s.name}</span>
+                        <div className="min-w-0">
+                          <span className="font-semibold" style={{ color: '#141414' }}>{s.name}</span>
+                          {/* 클래스 칩 — 미배정이면 회색 안내, 1개 이상이면 반 이름 칩으로 노출. */}
+                          {s.classes.length === 0 ? (
+                            <p className="text-xs mt-0.5" style={{ color: '#9A9A9A' }}>반 미배정</p>
+                          ) : (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {s.classes.slice(0, 3).map((c) => (
+                                <span key={c.id}
+                                  className="inline-flex items-center px-1.5 py-0.5 rounded text-xs"
+                                  style={{ background: '#E9F0FF', color: '#2B6CFF' }}>
+                                  {c.name}
+                                </span>
+                              ))}
+                              {s.classes.length > 3 && (
+                                <span className="inline-flex items-center text-xs"
+                                  style={{ color: '#9A9A9A' }}>
+                                  +{s.classes.length - 3}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </td>
                     <td style={{ padding: '12px 16px', verticalAlign: 'middle' }}>

@@ -279,14 +279,8 @@ export async function POST(request: Request) {
     );
   }
 
-  // ── 4·5. 알림톡/SMS 발송 일시 비활성화 ──────────────────────────
-  //
-  // 카카오 알림톡/SMS 발송 기능을 임시로 꺼둔 상태.
-  // why: 솔라피 검수/운영 결정이 끝날 때까지 실제 발송을 막고,
-  //      "전송실패"가 관리자 페이지에 누적되지 않도록 notification_logs 적재 자체를 생략.
-  //      → 출석은 정상 기록되지만 알림은 보내지 않음 (학부모 통지 없음).
-  // 다시 켤 때: 아래 블록의 주석을 해제하면 됨 (parents 조회 / pending insert / /api/notify 호출).
-  /*
+  // ── 4. notification_logs 'pending' 적재 ──────────────────────
+
   // 해당 학생의 학부모 ID를 다시 조회.
   // why: 1단계에선 phone_last4 일치하는 부모만 가져왔지만,
   //      알림은 "그 학생의 모든 학부모"에게 가야 하므로 student_id 기준으로 새로 가져온다.
@@ -339,7 +333,6 @@ export async function POST(request: Request) {
   }).catch((err) => {
     console.error('[attendance] notify dispatch failed:', err);
   });
-  */
 
   // ── 6. 성공 응답 ────────────────────────────────────────────
 

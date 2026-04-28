@@ -132,6 +132,46 @@ export async function GET() {
     );
   }
 
+  // 2b) 학생 ↔ 클래스 매핑 + 클래스 weekdays 조회.
+  //     why: 결석 판정은 "학생이 속한 클래스의 수업 요일에 해당하는 날짜"만 분모로 본다.
+  //          여러 반에 속한 학생은 weekdays 합집합을 사용 (어느 한 반이라도 수업 있는 날).
+  //          클래스 미배정 학생은 합집합이 비어 있어 자연스럽게 결석 집계에서 제외된다.
+  const studentIdsAll = (students ?? []).map((s) => s.id);
+  const weekdayUnionByStudent = new Map<string, Set<number>>();
+  if (studentIdsAll.length > 0) {
+    const { data: links, error: linksErr } = await supabase
+      .from('student_classes')
+      .select('student_id, classes!inner(weekdays, academy_id)')
+      .in('student_id', studentIdsAll);
+    if (linksErr) {
+      return NextResponse.json(
+        { error: 'DB_ERROR', detail: linksErr.message },
+        { status: 500 },
+      );
+    }
+    type LinkRow = {
+      student_id: string;
+      classes:
+        | { weekdays: number[] | null; academy_id: string }
+        | { weekdays: number[] | null; academy_id: string }[]
+        | null;
+    };
+    for (const raw of (links ?? []) as LinkRow[]) {
+      const rel = Array.isArray(raw.classes) ? raw.classes[0] : raw.classes;
+      if (!rel || rel.academy_id !== claims.academy_id) continue;
+      const set = weekdayUnionByStudent.get(raw.student_id) ?? new Set<number>();
+      for (const w of rel.weekdays ?? []) set.add(w);
+      weekdayUnionByStudent.set(raw.student_id, set);
+    }
+  }
+
+  // 날짜 문자열 → 요일(0~6) 변환을 미리 캐시. 같은 날짜를 학생 수만큼 다시 파싱하지 않도록.
+  const weekdayByDate = new Map<string, number>();
+  for (const d of allDates) {
+    const [y, m, day] = d.split('-').map(Number);
+    weekdayByDate.set(d, new Date(y, m - 1, day).getDay());
+  }
+
   // 3) 개원 이후 등원 로그 전부.
   //    why: 학생/날짜별로 메모리에서 매칭해 "결석 = checkin 없음"을 판정한다.
   //         날짜 단위로 쿼리를 N번 돌리면 N×라운드트립이 되므로 1회 풀스캔이 더 싸다.
@@ -178,11 +218,17 @@ export async function GET() {
 
   // 6) 학생 × 날짜 조합 순회 → 결석 row 생성.
   //    학생.created_at(KST 날짜) 이전 날짜는 건너뛴다.
+  //    클래스 미배정 학생(weekdays union이 비어있음)은 결석 정의가 없으므로 통째로 건너뛴다.
+  //    학생이 속한 클래스의 weekdays 합집합에 포함되지 않는 요일도 결석 후보에서 제외.
   const result: AbsenceRow[] = [];
   for (const s of students ?? []) {
+    const allowedWeekdays = weekdayUnionByStudent.get(s.id);
+    if (!allowedWeekdays || allowedWeekdays.size === 0) continue;
     const studentJoinDate = toKstDateStr(s.created_at!);
     for (const date of allDates) {
       if (date < studentJoinDate) continue;
+      const wd = weekdayByDate.get(date)!;
+      if (!allowedWeekdays.has(wd)) continue;
       const key = `${s.id}::${date}`;
       if (checkinSet.has(key)) continue;
       const absentInfo = absentMap.get(key);

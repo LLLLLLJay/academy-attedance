@@ -153,6 +153,72 @@ export type Database = {
           },
         ];
       };
+      classes: {
+        Row: {
+          id: string;
+          academy_id: string;
+          name: string;
+          // 0=일 ~ 6=토. 빈 배열 = 휴강(수업 요일 없음).
+          weekdays: number[];
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          academy_id: string;
+          name: string;
+          weekdays?: number[];
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          academy_id?: string;
+          name?: string;
+          weekdays?: number[];
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'classes_academy_id_fkey';
+            columns: ['academy_id'];
+            isOneToOne: false;
+            referencedRelation: 'academies';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
+      student_classes: {
+        Row: {
+          student_id: string;
+          class_id: string;
+          created_at: string;
+        };
+        Insert: {
+          student_id: string;
+          class_id: string;
+          created_at?: string;
+        };
+        Update: {
+          student_id?: string;
+          class_id?: string;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'student_classes_student_id_fkey';
+            columns: ['student_id'];
+            isOneToOne: false;
+            referencedRelation: 'students';
+            referencedColumns: ['id'];
+          },
+          {
+            foreignKeyName: 'student_classes_class_id_fkey';
+            columns: ['class_id'];
+            isOneToOne: false;
+            referencedRelation: 'classes';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
       notification_logs: {
         Row: {
           id: string;
@@ -229,3 +295,9 @@ export type Student = Tables<'students'>;
 export type StudentParent = Tables<'student_parents'>;
 export type AttendanceLog = Tables<'attendance_logs'>;
 export type NotificationLog = Tables<'notification_logs'>;
+export type Class = Tables<'classes'>;
+export type StudentClass = Tables<'student_classes'>;
+
+// 0=일요일 ~ 6=토요일 — JS Date.getDay() 기준.
+// 클래스의 weekdays 배열, 결석/대시보드 집계의 요일 비교 등에서 통일적으로 사용한다.
+export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;

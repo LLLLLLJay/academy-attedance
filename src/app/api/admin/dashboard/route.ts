@@ -26,7 +26,11 @@ type RecentLogResponse = {
 };
 
 type DashboardResponse = {
+  // 활동 학생 전체 수 — 학생 관리 페이지 지표 등에서 참고용으로 유지.
   total_active_students: number;
+  // 오늘(KST 요일) 수업이 있는 활성 학생 수 — 등원/미등원 카드의 분모로 사용.
+  // 클래스 미배정 학생은 분모에서 제외 (결석 정의가 없음).
+  today_expected_count: number;
   today_checkin_count: number;
   today_checkout_count: number;
   recent: RecentLogResponse[];
@@ -41,10 +45,11 @@ type JoinedRow = {
   students: { name: string } | { name: string }[] | null;
 };
 
-// 한국 시간(KST = UTC+9) 기준 "오늘 자정 ~ 내일 자정"의 UTC ISO 범위.
+// 한국 시간(KST = UTC+9) 기준 "오늘 자정 ~ 내일 자정" UTC ISO 범위 + 오늘 KST 요일.
 // why: SCHEMA.md 쿼리는 current_date에 의존 — DB 세션 timezone과 무관하게 동작하도록
 //      애플리케이션에서 명시적으로 KST 경계를 계산한다. (absentees/route.ts와 동일 방식)
-function todayKstRangeIso(): { from: string; to: string } {
+//      weekday는 "오늘 수업이 있는 클래스 → 학생" 합집합 계산에 사용한다.
+function todayKst(): { from: string; to: string; weekday: number } {
   const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
   const nowKst = new Date(Date.now() + KST_OFFSET_MS);
   const kstMidnightUtcMs = Date.UTC(
@@ -52,9 +57,11 @@ function todayKstRangeIso(): { from: string; to: string } {
     nowKst.getUTCMonth(),
     nowKst.getUTCDate(),
   ) - KST_OFFSET_MS;
-  const from = new Date(kstMidnightUtcMs).toISOString();
-  const to = new Date(kstMidnightUtcMs + 24 * 60 * 60 * 1000).toISOString();
-  return { from, to };
+  return {
+    from: new Date(kstMidnightUtcMs).toISOString(),
+    to: new Date(kstMidnightUtcMs + 24 * 60 * 60 * 1000).toISOString(),
+    weekday: nowKst.getUTCDay(),
+  };
 }
 
 export async function GET() {
@@ -64,11 +71,13 @@ export async function GET() {
   }
 
   const supabase = await createClient();
-  const { from, to } = todayKstRangeIso();
+  const { from, to, weekday } = todayKst();
 
-  // 4개 쿼리를 병렬 실행 — 서로 의존성이 없어 순차 대기 시간이 합산되는 것을 회피.
+  // 5개 쿼리를 병렬 실행 — 서로 의존성이 없어 순차 대기 시간이 합산되는 것을 회피.
   // count: 'exact', head: true — row 본문은 가져오지 않고 카운트만 받아 페이로드 절감.
-  const [activeRes, checkinRes, checkoutRes, recentRes] = await Promise.all([
+  // expectedRes: 오늘 weekday에 수업이 있는 클래스에 속한 활성 학생 ID 목록 (중복 제거 후 카운트).
+  //   why: array-contains 필터를 students/students_classes에 직접 못 거니까 클래스 → 조인 → dedup 흐름.
+  const [activeRes, checkinRes, checkoutRes, recentRes, todayClassRes] = await Promise.all([
     supabase
       .from('students')
       .select('id', { count: 'exact', head: true })
@@ -99,15 +108,53 @@ export async function GET() {
       .in('type', ['checkin', 'checkout'])
       .order('checked_at', { ascending: false })
       .limit(10),
+    // 오늘 weekday에 수업하는 클래스 — array contains 연산자로 PostgREST 필터링.
+    supabase
+      .from('classes')
+      .select('id')
+      .eq('academy_id', claims.academy_id)
+      .filter('weekdays', 'cs', `{${weekday}}`),
   ]);
 
   const firstError =
-    activeRes.error ?? checkinRes.error ?? checkoutRes.error ?? recentRes.error;
+    activeRes.error ?? checkinRes.error ?? checkoutRes.error ?? recentRes.error ?? todayClassRes.error;
   if (firstError) {
     return NextResponse.json(
       { error: 'DB_ERROR', detail: firstError.message },
       { status: 500 },
     );
+  }
+
+  // today_expected_count 계산 — 오늘 클래스 → student_classes → 활성 학생 dedup.
+  // why: 휴일(어떤 클래스도 오늘 수업 없음)이면 0으로 떨어져야 분모가 안전하게 계산됨.
+  let todayExpectedCount = 0;
+  const todayClassIds = (todayClassRes.data ?? []).map((c) => c.id);
+  if (todayClassIds.length > 0) {
+    const { data: scheduledLinks, error: scheduledErr } = await supabase
+      .from('student_classes')
+      .select('student_id, students!inner(id, is_active, academy_id)')
+      .in('class_id', todayClassIds);
+    if (scheduledErr) {
+      return NextResponse.json(
+        { error: 'DB_ERROR', detail: scheduledErr.message },
+        { status: 500 },
+      );
+    }
+    type SchedRow = {
+      student_id: string;
+      students:
+        | { id: string; is_active: boolean; academy_id: string }
+        | { id: string; is_active: boolean; academy_id: string }[]
+        | null;
+    };
+    const expectedIds = new Set<string>();
+    for (const raw of (scheduledLinks ?? []) as SchedRow[]) {
+      const rel = Array.isArray(raw.students) ? raw.students[0] : raw.students;
+      if (!rel || !rel.is_active) continue;
+      if (rel.academy_id !== claims.academy_id) continue;
+      expectedIds.add(rel.id);
+    }
+    todayExpectedCount = expectedIds.size;
   }
 
   const recent: RecentLogResponse[] = ((recentRes.data ?? []) as JoinedRow[]).map(
@@ -125,6 +172,7 @@ export async function GET() {
 
   const body: DashboardResponse = {
     total_active_students: activeRes.count ?? 0,
+    today_expected_count: todayExpectedCount,
     today_checkin_count: checkinRes.count ?? 0,
     today_checkout_count: checkoutRes.count ?? 0,
     recent,

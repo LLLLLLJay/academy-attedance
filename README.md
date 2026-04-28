@@ -21,7 +21,7 @@
 | `/` | `/tablet`으로 리다이렉트 | — |
 | `/tablet` | 학생용 출석 키오스크 (가로 1280×800 고정) | 없음 |
 | `/admin/login` | 관리자 비밀번호 로그인 | 없음 |
-| `/admin` | 관리자 대시보드 / 출석 기록 / 학생 관리 / 결석 관리 / 발송 실패 | JWT 쿠키 (middleware 가드) |
+| `/admin` | 관리자 대시보드 / 출석 기록 / 학생 관리 / 클래스 관리 / 결석 관리 / 발송 실패 | JWT 쿠키 (middleware 가드) |
 
 ### API
 
@@ -31,16 +31,20 @@
 | `POST /api/notify` | 솔라피 알림톡 발송 + 재시도 상태 갱신 (key/PFID/템플릿 환경변수 필요) |
 | `POST /api/auth` | 관리자 로그인 (비밀번호 검증 후 JWT 쿠키 발급) |
 | `DELETE /api/auth` | 관리자 로그아웃 (쿠키 만료) |
-| `GET /api/admin/dashboard` | 대시보드 카운트(총원/등원/하원) + 최근 활동 10건 |
+| `GET /api/admin/dashboard` | 대시보드 카운트(총원/오늘 수업 학생/등원/하원) + 최근 활동 10건 |
 | `GET /api/admin/attendance` | 출석 기록 (등원/하원만, 기간·타입·학생 필터) |
 | `PATCH /api/admin/attendance/[id]` | 출석 row의 메모 인라인 수정 |
-| `GET /api/admin/absentees` | 오늘 미등원 학생 카운트용 리스트 |
-| `GET /api/admin/absences` | 결석 관리 — 등원 기록이 없는 (학생, 날짜) + absent row 메모 |
+| `GET /api/admin/absentees` | 오늘 수업이 있는 활성 학생 중 미등원 리스트 |
+| `GET /api/admin/absences` | 결석 관리 — 학생별 클래스 요일 합집합 기준 (학생, 날짜) + absent row 메모 |
 | `POST /api/admin/absences` | 결석 보강 메모 INSERT/UPDATE |
-| `GET /api/admin/students` | 학생·학부모 목록 |
+| `GET /api/admin/students` | 학생·학부모·소속 클래스 목록 |
 | `POST /api/admin/students` | 학생 등록 (학부모 N명 함께) |
 | `PATCH /api/admin/students/[id]` | 학생 정보 / 학부모 / 활성 상태 수정 |
 | `DELETE /api/admin/students/[id]` | 학생 소프트 삭제 (`is_active=false`) |
+| `GET /api/admin/classes` | 클래스 목록 (이름·요일·소속 학생 평탄화) |
+| `POST /api/admin/classes` | 클래스 등록 + 학생 일괄 배정 |
+| `PATCH /api/admin/classes/[id]` | 클래스 정보 수정 + 학생 배정 전체 교체 |
+| `DELETE /api/admin/classes/[id]` | 클래스 삭제 (student_classes는 CASCADE) |
 | `GET /api/admin/notifications/failed` | 3회 실패한 알림 + 재시도 중 알림 목록 |
 
 ## 시작하기
@@ -80,7 +84,9 @@ SOLAPI_TEMPLATE_ID_CHECKOUT=       # 하원 템플릿 ID
 
 ### 3. Supabase 스키마 세팅
 
-[SCHEMA.md](./SCHEMA.md)의 SQL을 Supabase SQL Editor에서 실행한 뒤, `academies` 테이블에 학원 1건과 bcrypt 해시한 관리자 비밀번호를 INSERT.
+신규 환경이면 [SCHEMA.md §2](./SCHEMA.md#2-전체-스키마-sql)의 전체 SQL을 Supabase SQL Editor에서 실행. 기존 환경에 점진 적용한다면 `supabase/migrations/` 아래 파일을 번호 순으로 실행한다 (예: `0002_classes.sql` — 클래스/조인 테이블 추가).
+
+스키마 적용 후 `academies` 테이블에 학원 1건과 bcrypt 해시한 관리자 비밀번호를 INSERT.
 
 ```sql
 -- 예시: 비밀번호 해시는 Node REPL에서
@@ -88,6 +94,8 @@ SOLAPI_TEMPLATE_ID_CHECKOUT=       # 하원 템플릿 ID
 insert into academies (name, admin_password_hash)
 values ('새벽별 학원', '$2a$10$...');
 ```
+
+이후 관리자 페이지 `/admin/classes` 에서 반(클래스)을 만들고 학생을 배정해야 결석 집계와 미등원 카드가 의미 있는 값을 반환한다 (클래스 미배정 학생은 결석 분모에서 자동 제외).
 
 ### 4. 개발 서버 실행
 
@@ -110,7 +118,7 @@ npm run dev
 ## 참고 문서
 
 - [CLAUDE.md](./CLAUDE.md) — Claude Code용 프로젝트 컨텍스트
-- [PRD_v0.3.md](./PRD_v0.3.md) — 전체 기능 요구사항 + 엣지케이스
+- [PRD.md](./PRD.md) — 전체 기능 요구사항 + 엣지케이스 (문서 헤더에 현재 버전 표기)
 - [SCHEMA.md](./SCHEMA.md) — Supabase 스키마 SQL + 핵심 쿼리
 - [ALIMTALK_TEMPLATE.md](./ALIMTALK_TEMPLATE.md) — 솔라피 알림톡 템플릿 + 연동 가이드
 
