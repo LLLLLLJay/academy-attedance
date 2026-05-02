@@ -4,8 +4,8 @@ import { useEffect, useMemo, useState } from 'react'
 
 // API 응답 형태 — /api/admin/absences GET 결과와 1:1 매칭.
 // absence_log_id가 null이면 아직 absent row가 없다는 뜻 → 저장 시 INSERT.
-// memo_created_at은 absent row의 created_at(ISO timestamptz). UPDATE해도 보존되므로
-// 디자인의 "보강 YYYY.MM.DD"(최초 작성일 유지) 표시에 그대로 쓸 수 있다.
+// memo_created_at은 absent row의 created_at(ISO timestamptz). API의 UPDATE 분기가
+// 이 값을 함께 갱신해 화면의 "작성일 YYYY.MM.DD"가 최근 작성 시점을 가리킨다.
 type AbsenceRow = {
   student_id: string
   student_name: string
@@ -33,20 +33,6 @@ function Icon({ name, size = 16, strokeWidth = 1.7 }: { name: string; size?: num
       strokeLinecap="round" strokeLinejoin="round">
       {paths[name]}
     </svg>
-  )
-}
-
-function Avatar({ name, size = 32 }: { name: string; size?: number }) {
-  // 결석 화면에서는 학생을 중립 톤으로 표시 — 등원/하원의 warm/cool과 시각적으로 구분.
-  return (
-    <div style={{
-      width: size, height: size, borderRadius: 8,
-      background: '#F2F2EC', color: '#5B5B5B',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      fontSize: size * 0.38, fontWeight: 700, flexShrink: 0,
-    }}>
-      {name.slice(-1) || '?'}
-    </div>
   )
 }
 
@@ -254,7 +240,7 @@ export default function AbsenceManagement() {
           </h2>
           <p className="text-sm mt-1" style={{ color: '#5B5B5B' }}>
             전체 결석 <b style={{ color: '#141414' }}>{totalCount}</b>건 ·
-            보강 메모 <b style={{ color: '#141414' }}>{memoCount}</b>건 ·
+            메모 <b style={{ color: '#141414' }}>{memoCount}</b>건 ·
             미작성 <b style={{ color: '#141414' }}>{totalCount - memoCount}</b>건
           </p>
         </div>
@@ -312,7 +298,7 @@ export default function AbsenceManagement() {
           iconName="alert"
         />
         <StatCard
-          label={`${rangeLabel} 보강 메모 미등록`}
+          label={`${rangeLabel} 메모 미등록`}
           value={stats.missing}
           tone="warn"
           iconName="note"
@@ -341,7 +327,7 @@ export default function AbsenceManagement() {
                 <tr style={{ background: '#FAFAF7' }}>
                   <th style={thStyle(160)}>날짜</th>
                   <th style={thStyle(200)}>학생 이름</th>
-                  <th style={thStyle()}>보강 메모</th>
+                  <th style={thStyle()}>메모</th>
                 </tr>
               </thead>
               <tbody>
@@ -367,13 +353,8 @@ export default function AbsenceManagement() {
                       </td>
                       {/* 학생 이름 (학년/반은 DB에 없어 생략 — README와 어긋나지만 사용자 결정) */}
                       <td style={tdStyle()}>
-                        <div className="flex items-center gap-2.5">
-                          <Avatar name={row.student_name} size={32} />
-                          <div className="min-w-0">
-                            <div className="text-sm font-semibold truncate" style={{ color: '#141414' }}>
-                              {row.student_name}
-                            </div>
-                          </div>
+                        <div className="text-sm font-semibold truncate" style={{ color: '#141414' }}>
+                          {row.student_name}
                         </div>
                       </td>
                       {/* 보강 메모 — 저장됨 / 편집중 분기 */}
@@ -388,7 +369,7 @@ export default function AbsenceManagement() {
                               {row.memo_created_at && (
                                 <div className="text-xs mt-1 tabular-nums"
                                   style={{ color: '#9A9A9A' }}>
-                                  보강 {formatMemoDate(row.memo_created_at)}
+                                  작성일 {formatMemoDate(row.memo_created_at)}
                                 </div>
                               )}
                             </div>
@@ -509,7 +490,7 @@ function EmptyCard({ hasFilter }: { hasFilter: boolean }) {
         <div className="text-sm" style={{ color: '#9A9A9A' }}>
           {hasFilter
             ? '검색어나 기간을 변경해보세요.'
-            : '결석이 발생하면 이곳에서 보강 메모를 남길 수 있어요.'}
+            : '결석이 발생하면 이곳에서 메모를 남길 수 있어요.'}
         </div>
       </div>
     </div>

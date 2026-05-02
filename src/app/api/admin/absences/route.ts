@@ -32,9 +32,9 @@ type AbsenceRow = {
   // 'absent' 로그가 아직 없으면 null, 있으면 그 row id (POST에서 UPDATE 분기 판정에 쓰임).
   absence_log_id: string | null;
   memo: string | null;
-  // 보강 메모 작성일(ISO timestamptz) — 화면의 "보강 YYYY.MM.DD" 표시에 사용.
-  // why: attendance_logs.created_at은 INSERT 시점에만 찍히고 UPDATE해도 보존되므로
-  //      디자인의 "최초 작성일을 유지한다"는 동작과 일치한다. 별도 컬럼 불필요.
+  // 보강 메모 작성일(ISO timestamptz) — 화면의 "작성일 YYYY.MM.DD" 표시에 사용.
+  // why: INSERT 시점에 찍히고 UPDATE 시에도 함께 갱신되어 "최근 작성일"을 의미.
+  //      별도 updated_at 컬럼을 추가하지 않고 created_at을 mutate해 schema 변경을 회피.
   memo_created_at: string | null;
 };
 
@@ -189,7 +189,7 @@ export async function GET() {
   }
 
   // 4) 같은 기간의 'absent' 로그 — 화면에 메모와 row id를 같이 내려보내려고 함께 적재.
-  //    created_at은 보강 메모 작성일("보강 YYYY.MM.DD") 표시에 사용.
+  //    created_at은 메모 작성일("작성일 YYYY.MM.DD") 표시에 사용.
   const { data: absents, error: absentsErr } = await supabase
     .from('attendance_logs')
     .select('id, student_id, checked_at, memo, created_at')
@@ -321,8 +321,13 @@ export async function POST(request: Request) {
   }
 
   if (existing && existing.length > 0) {
-    // 기존 absent row의 메모만 갱신.
-    const update: TablesUpdate<'attendance_logs'> = { memo: memo || null };
+    // 기존 absent row의 메모를 갱신. created_at도 함께 mutate해 "작성일"이 최근 시점으로 갱신되게 한다.
+    // why: 화면의 "작성일 YYYY.MM.DD"가 최근 수정 시점을 반영해야 하는데, 별도 updated_at 컬럼을
+    //      추가하지 않기로 한 결정에 따라 created_at을 last-modified 의미로 재사용한다.
+    const update: TablesUpdate<'attendance_logs'> = {
+      memo: memo || null,
+      created_at: new Date().toISOString(),
+    };
     const { data: updated, error: updateErr } = await supabase
       .from('attendance_logs')
       .update(update)
