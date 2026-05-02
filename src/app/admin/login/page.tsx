@@ -68,7 +68,15 @@ export default function AdminLoginPage() {
         onSubmit={handleSubmit}
         className="w-full max-w-sm space-y-5 rounded-lg bg-white p-6 shadow"
       >
-        <h1 className="text-xl font-bold">관리자 로그인</h1>
+        {/* 로고: 빈 로그인 화면을 채우면서 학원 정체성 노출. h-24로 충분히 크게 띄움 */}
+        <div className="flex flex-col items-center gap-3">
+          <img
+            src="/logo.png"
+            alt="엘 영어학원 로고"
+            className="h-24 w-auto object-contain"
+          />
+          <h1 className="text-xl font-bold">관리자 로그인</h1>
+        </div>
 
         <div className="space-y-2">
           <label htmlFor="password" className="block text-sm font-medium">
