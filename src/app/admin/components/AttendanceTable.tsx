@@ -13,7 +13,7 @@ type AttendanceLogRow = {
   memo: string | null
 }
 
-type RangeKey = 'week' | 'month' | 'all'
+type RangeKey = 'week' | 'month' | 'all' | 'custom'
 type TypeFilter = 'all' | 'checkin' | 'checkout'
 
 function Icon({ name, size = 16, strokeWidth = 1.7, color }: { name: string; size?: number; strokeWidth?: number; color?: string }) {
@@ -24,6 +24,7 @@ function Icon({ name, size = 16, strokeWidth = 1.7, color }: { name: string; siz
     check: <path d="M4 12L10 18L20 6"/>,
     plus: <><path d="M12 5V19"/><path d="M5 12H19"/></>,
     note: <><path d="M5 4H15L19 8V20H5Z"/><path d="M15 4V8H19"/><path d="M8 12H16"/><path d="M8 16H14"/></>,
+    chevronDown: <path d="M6 9L12 15L18 9"/>,
   }
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -67,13 +68,150 @@ function formatChecked(iso: string): { date: string; day: string; time: string }
 }
 
 // range → API에 보낼 from(ISO) 계산. 'all'은 from 자체를 보내지 않아 서버에서 무제한으로 조회.
-function computeFromIso(range: RangeKey): string | null {
+// 'custom'은 사용자 지정 시작일(YYYY-MM-DD)을 그 날 자정(브라우저 로컬=KST)으로 변환.
+function computeFromIso(range: RangeKey, customFrom: string): string | null {
   if (range === 'all') return null
+  if (range === 'custom') {
+    if (!customFrom) return null
+    return new Date(`${customFrom}T00:00:00`).toISOString()
+  }
   const d = new Date()
   if (range === 'week') d.setDate(d.getDate() - 7)
   else d.setDate(d.getDate() - 30)
   d.setHours(0, 0, 0, 0)
   return d.toISOString()
+}
+
+// 'custom' 범위에서만 종료일 boundary 계산 — 그 날 23:59:59.999까지 포함.
+// why: API의 lte 비교라 자정으로 박으면 종료일 그날의 데이터가 누락됨.
+//      'week'/'month'/'all'은 to를 보내지 않아 서버에서 현재까지로 자연스럽게 흐름.
+function computeToIso(range: RangeKey, customTo: string): string | null {
+  if (range !== 'custom' || !customTo) return null
+  return new Date(`${customTo}T23:59:59.999`).toISOString()
+}
+
+// CSV 셀 escape — RFC 4180. 콤마/줄바꿈/따옴표 포함 시 따옴표로 감싸고 내부 따옴표는 두 번 반복.
+function escapeCsvCell(value: string): string {
+  if (/[",\n\r]/.test(value)) return `"${value.replace(/"/g, '""')}"`
+  return value
+}
+
+// 파일명 금지 문자(/\:*?"<>|)를 _로 치환. 한글/공백/물결표(~)는 모던 OS에서 허용되어 보존.
+function sanitizeFilename(s: string): string {
+  return s.replace(/[\\/:*?"<>|]/g, '_')
+}
+
+// 'YYYY-MM-DD' 오늘 문자열 (date input value 형식). UTC 변환 없이 로컬(KST) 자정 기준.
+function todayDateString(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+// 헤더 "기간 버튼"이 띄우는 모달 — 빠른 선택(7일/30일/전체)과 사용자 지정 날짜를 한 곳에 통합.
+// why: 기간 관련 컨트롤(select + 모달)이 분산돼 있던 UX를 단일 진입점으로 합쳐 사용자 시선 점프를 줄임.
+//      프리셋은 클릭 즉시 onApply → 모달 닫힘. 사용자 지정은 두 날짜 + 하단 '사용자 지정 적용' 버튼.
+function RangeModal({ currentRange, currentFrom, currentTo, onClose, onApply }: {
+  currentRange: RangeKey
+  currentFrom: string
+  currentTo: string
+  onClose: () => void
+  onApply: (range: RangeKey, from?: string, to?: string) => void
+}) {
+  const today = todayDateString()
+  // 기본값: 비어있으면 (오늘-7, 오늘)을 미리 깔아둠 — 사용자가 즉시 적용 가능하도록.
+  const defaultFrom = (() => {
+    if (currentFrom) return currentFrom
+    const d = new Date()
+    d.setDate(d.getDate() - 7)
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  })()
+  const [from, setFrom] = useState(defaultFrom)
+  const [to, setTo] = useState(currentTo || today)
+  const valid = Boolean(from && to && from <= to)
+
+  const presets: Array<{ value: RangeKey; label: string }> = [
+    { value: 'week', label: '최근 7일' },
+    { value: 'month', label: '최근 30일' },
+    { value: 'all', label: '전체 기간' },
+  ]
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-5"
+      style={{ background: 'rgba(10,10,10,0.45)' }}
+      onClick={onClose}>
+      <div className="w-full max-w-md rounded-xl overflow-hidden"
+        onClick={e => e.stopPropagation()}
+        style={{ background: '#fff' }}>
+        <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: '1px solid #F2F2EC' }}>
+          <h3 className="text-lg font-bold" style={{ color: '#141414' }}>기간 설정</h3>
+          <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-lg"
+            style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#9A9A9A' }}>
+            <Icon name="x" size={18} />
+          </button>
+        </div>
+        <div className="p-6 flex flex-col gap-5">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-widest mb-2.5" style={{ color: '#9A9A9A' }}>빠른 선택</p>
+            <div className="flex flex-col rounded-lg overflow-hidden" style={{ border: '1px solid #EAEAE4' }}>
+              {presets.map((p, i) => {
+                const selected = currentRange === p.value
+                return (
+                  <button key={p.value}
+                    onClick={() => onApply(p.value)}
+                    className="flex items-center justify-between px-4 py-3 text-sm font-medium text-left"
+                    style={{
+                      background: selected ? '#F2F2EC' : '#fff',
+                      color: '#141414',
+                      border: 'none',
+                      borderTop: i === 0 ? 'none' : '1px solid #EAEAE4',
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                    }}>
+                    <span>{p.label}</span>
+                    {selected && <Icon name="check" size={16} strokeWidth={2.4} color="#141414" />}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-widest mb-2.5" style={{ color: '#9A9A9A' }}>사용자 지정</p>
+            <div className="flex flex-col gap-3">
+              <div>
+                <label className="block text-xs font-semibold mb-1.5" style={{ color: '#5B5B5B' }}>시작일</label>
+                <input type="date" value={from} max={today}
+                  onChange={e => setFrom(e.target.value)}
+                  className="w-full h-10 rounded-lg px-3 text-sm tabular-nums outline-none"
+                  style={{ border: '1px solid #EAEAE4', color: '#141414', background: '#fff', boxSizing: 'border-box' }} />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold mb-1.5" style={{ color: '#5B5B5B' }}>종료일</label>
+                <input type="date" value={to} min={from} max={today}
+                  onChange={e => setTo(e.target.value)}
+                  className="w-full h-10 rounded-lg px-3 text-sm tabular-nums outline-none"
+                  style={{ border: '1px solid #EAEAE4', color: '#141414', background: '#fff', boxSizing: 'border-box' }} />
+              </div>
+              {!valid && from && to && (
+                <p className="text-xs" style={{ color: '#E5484D' }}>시작일은 종료일보다 빠르거나 같아야 합니다.</p>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 px-6 py-3.5" style={{ borderTop: '1px solid #F2F2EC', background: '#F2F2EC' }}>
+          <button onClick={onClose} className="h-9 px-4 rounded-lg text-sm font-medium"
+            style={{ background: 'transparent', color: '#5B5B5B', border: 'none', cursor: 'pointer', fontFamily: 'inherit' }}>
+            취소
+          </button>
+          <button onClick={() => valid && onApply('custom', from, to)} disabled={!valid}
+            className="h-9 px-4 rounded-lg text-sm font-semibold text-white disabled:opacity-50"
+            style={{ background: '#141414', border: 'none', cursor: valid ? 'pointer' : 'not-allowed', fontFamily: 'inherit' }}>
+            사용자 지정 적용
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function MemoModal({ row, onClose, onSave, busy }: {
@@ -95,7 +233,7 @@ function MemoModal({ row, onClose, onSave, busy }: {
         onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-6 py-5" style={{ borderBottom: '1px solid #F2F2EC' }}>
           <div>
-            <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: '#9A9A9A' }}>보강 메모</p>
+            <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: '#9A9A9A' }}>메모</p>
             <p className="text-xl font-bold mt-1" style={{ color: '#141414' }}>{row.student_name}</p>
           </div>
           <button onClick={onClose} disabled={busy} className="w-8 h-8 flex items-center justify-center rounded-lg"
@@ -150,6 +288,10 @@ export default function AttendanceTable() {
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all')
   const [memoOpen, setMemoOpen] = useState<AttendanceLogRow | null>(null)
   const [savingMemo, setSavingMemo] = useState(false)
+  // range='custom'일 때 사용되는 사용자 지정 시작/종료일 ('YYYY-MM-DD', 비어 있으면 미설정).
+  const [customFrom, setCustomFrom] = useState('')
+  const [customTo, setCustomTo] = useState('')
+  const [rangeModalOpen, setRangeModalOpen] = useState(false)
 
   // range/typeFilter 변경 시 서버 재조회.
   // why: 기간/타입은 row 수가 크게 달라질 수 있어 클라이언트 필터링보다 DB 쿼리에서 잘라내는 편이 효율적.
@@ -161,8 +303,10 @@ export default function AttendanceTable() {
     void (async () => {
       try {
         const params = new URLSearchParams()
-        const fromIso = computeFromIso(range)
+        const fromIso = computeFromIso(range, customFrom)
+        const toIso = computeToIso(range, customTo)
         if (fromIso) params.set('from', fromIso)
+        if (toIso) params.set('to', toIso)
         if (typeFilter !== 'all') params.set('type', typeFilter)
         const res = await fetch(`/api/admin/attendance?${params.toString()}`, { cache: 'no-store' })
         if (cancelled) return
@@ -184,7 +328,7 @@ export default function AttendanceTable() {
     return () => {
       cancelled = true
     }
-  }, [range, typeFilter])
+  }, [range, typeFilter, customFrom, customTo])
 
   const filtered = useMemo(() => {
     if (!query) return logs
@@ -215,54 +359,100 @@ export default function AttendanceTable() {
     }
   }
 
-  const rangeLabel = range === 'week' ? '최근 7일' : range === 'month' ? '최근 30일' : '전체 기간'
+  const rangeLabel =
+    range === 'week' ? '최근 7일'
+    : range === 'month' ? '최근 30일'
+    : range === 'all' ? '전체 기간'
+    : (customFrom && customTo) ? `${customFrom.replace(/-/g, '.')} ~ ${customTo.replace(/-/g, '.')}`
+    : '사용자 지정'
+
+  // 현재 보이는 필터 결과(filtered)를 CSV로 변환해 다운로드.
+  // why: 백엔드 export 엔드포인트를 추가하지 않고 클라이언트에서만 처리 — 데이터가 이미 메모리에 있고
+  //      Blob+ObjectURL로 외부 의존성 없이 즉시 다운로드 가능.
+  const exportCsv = () => {
+    const headers = ['날짜', '요일', '학생명', '구분', '시각', '메모']
+    const rows = filtered.map((row) => {
+      const ts = formatChecked(row.checked_at)
+      return [
+        ts.date,
+        ts.day,
+        row.student_name,
+        row.type === 'checkin' ? '등원' : '하원',
+        ts.time,
+        row.memo ?? '',
+      ].map(escapeCsvCell).join(',')
+    })
+    // \r\n: Excel가 줄바꿈을 가장 안정적으로 인식.
+    // ﻿: UTF-8 BOM — Excel가 한글을 깨지 않게 하는 필수 prefix.
+    const csv = '﻿' + [headers.join(','), ...rows].join('\r\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+
+    const today = todayDateString().replace(/-/g, '.')
+    const rangePart =
+      range === 'week' ? '최근7일'
+      : range === 'month' ? '최근30일'
+      : range === 'all' ? '전체'
+      : (customFrom && customTo) ? `${customFrom.replace(/-/g, '.')}~${customTo.replace(/-/g, '.')}`
+      : '사용자지정'
+    // custom의 경우 파일명에 이미 기간이 있어 today 중복 회피.
+    const filename = sanitizeFilename(
+      range === 'custom' ? `출석기록_${rangePart}.csv` : `출석기록_${rangePart}_${today}.csv`,
+    )
+
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
 
   return (
     <div>
       <div className="flex items-end justify-between mb-5 flex-wrap gap-3">
         <div>
           <h2 className="text-2xl font-extrabold tracking-tight" style={{ color: '#141414' }}>출석 기록</h2>
-          <p className="text-sm mt-1" style={{ color: '#5B5B5B' }}>기간: {rangeLabel} · {filtered.length}건</p>
+          <p className="text-sm mt-1 tabular-nums" style={{ color: '#5B5B5B' }}>총 {filtered.length}건</p>
         </div>
-        <div className="flex gap-2">
-          <button className="flex items-center gap-1.5 h-9 px-3 rounded-lg text-sm font-medium"
-            style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414', cursor: 'pointer', fontFamily: 'inherit' }}>
-            <Icon name="calendar" size={14} />기간 설정
-          </button>
-          <button className="h-9 px-3 rounded-lg text-sm font-medium"
-            style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414', cursor: 'pointer', fontFamily: 'inherit' }}>
-            엑셀 내보내기
-          </button>
-        </div>
+        <button onClick={exportCsv} disabled={filtered.length === 0}
+          className="h-9 px-3 rounded-lg text-sm font-medium disabled:opacity-50"
+          style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414', cursor: filtered.length === 0 ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>
+          엑셀 내보내기
+        </button>
       </div>
 
+      {/* 필터 카드: 기간/검색/구분/초기화를 한 줄에 그룹. flex-wrap으로 좁은 화면에서 자연 줄바꿈,
+          검색 input만 flex-1로 남는 공간 흡수해 나머지 컨트롤은 콘텐츠 폭만 차지. */}
       <div className="rounded-xl p-3.5 mb-4" style={{ background: '#fff', border: '1px solid #EAEAE4' }}>
-        <div className="grid gap-2.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
-          <div className="relative flex items-center">
+        <div className="flex flex-wrap items-center gap-2.5">
+          {/* 기간 버튼: 현재 선택된 기간을 라벨로 표시 → 클릭 시 RangeModal로 빠른 선택/사용자 지정 일괄 처리. */}
+          <button onClick={() => setRangeModalOpen(true)}
+            className="flex items-center gap-2 h-10 px-3 rounded-lg text-sm font-semibold flex-shrink-0"
+            style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414', cursor: 'pointer', fontFamily: 'inherit' }}>
+            <Icon name="calendar" size={14} />
+            <span className="tabular-nums">{rangeLabel}</span>
+            <Icon name="chevronDown" size={14} color="#9A9A9A" />
+          </button>
+          <div className="relative flex items-center flex-1" style={{ minWidth: 200 }}>
             <span className="absolute left-3 pointer-events-none" style={{ color: '#9A9A9A' }}><Icon name="search" size={14} /></span>
             <input value={query} onChange={e => setQuery(e.target.value)}
               placeholder="학생 이름 검색"
               className="w-full h-10 rounded-lg pl-9 pr-3 text-sm outline-none"
               style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414' }} />
           </div>
-          <select value={range} onChange={e => setRange(e.target.value as RangeKey)}
-            className="h-10 rounded-lg px-3 text-sm cursor-pointer outline-none"
-            style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414', fontFamily: 'inherit' }}>
-            <option value="week">최근 7일</option>
-            <option value="month">최근 30일</option>
-            <option value="all">전체 기간</option>
-          </select>
           <select value={typeFilter} onChange={e => setTypeFilter(e.target.value as TypeFilter)}
-            className="h-10 rounded-lg px-3 text-sm cursor-pointer outline-none"
+            className="h-10 rounded-lg px-3 text-sm cursor-pointer outline-none flex-shrink-0"
             style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#141414', fontFamily: 'inherit' }}>
             <option value="all">전체 구분</option>
             <option value="checkin">등원만</option>
             <option value="checkout">하원만</option>
           </select>
-          <button onClick={() => { setQuery(''); setRange('week'); setTypeFilter('all') }}
-            className="h-10 rounded-lg px-3 text-sm font-medium"
+          <button onClick={() => { setQuery(''); setRange('week'); setTypeFilter('all'); setCustomFrom(''); setCustomTo('') }}
+            className="h-10 px-3 rounded-lg text-sm font-medium flex-shrink-0"
             style={{ border: '1px solid #EAEAE4', background: '#fff', color: '#5B5B5B', cursor: 'pointer', fontFamily: 'inherit' }}>
-            필터 초기화
+            초기화
           </button>
         </div>
       </div>
@@ -279,7 +469,7 @@ export default function AttendanceTable() {
           <table className="w-full" style={{ borderCollapse: 'collapse', fontSize: 14, minWidth: 720 }}>
             <thead>
               <tr style={{ background: '#F2F2EC', textAlign: 'left' }}>
-                {[['날짜', 130], ['학생', 200], ['구분', 100], ['시각', 100], ['보강 메모', 240]].map(([label, w]) => (
+                {[['날짜', 130], ['학생', 200], ['구분', 100], ['시각', 100], ['메모', 240]].map(([label, w]) => (
                   <th key={label} className="uppercase tracking-widest"
                     style={{ padding: '12px 16px', fontSize: 12, color: '#5B5B5B', fontWeight: 600, width: w, whiteSpace: 'nowrap' }}>
                     {label}
@@ -303,11 +493,7 @@ export default function AttendanceTable() {
                       <p className="text-xs mt-0.5" style={{ color: '#9A9A9A' }}>{ts.day}요일</p>
                     </td>
                     <td style={{ padding: '12px 16px', verticalAlign: 'middle' }}>
-                      <div className="flex items-center gap-2.5">
-                        <Avatar name={r.student_name}
-                          kind={r.type === 'checkin' ? 'warm' : 'cool'} size={32} />
-                        <p className="text-sm font-semibold truncate" style={{ color: '#141414' }}>{r.student_name}</p>
-                      </div>
+                      <p className="text-sm font-semibold truncate" style={{ color: '#141414' }}>{r.student_name}</p>
                     </td>
                     <td style={{ padding: '12px 16px', verticalAlign: 'middle' }}>
                       <TypeBadge type={r.type} />
@@ -341,6 +527,26 @@ export default function AttendanceTable() {
 
       {memoOpen && (
         <MemoModal row={memoOpen} onClose={() => setMemoOpen(null)} onSave={saveMemo} busy={savingMemo} />
+      )}
+      {rangeModalOpen && (
+        <RangeModal
+          currentRange={range}
+          currentFrom={customFrom}
+          currentTo={customTo}
+          onClose={() => setRangeModalOpen(false)}
+          onApply={(r, from, to) => {
+            setRange(r)
+            // 프리셋(week/month/all) 선택 시 stale custom 값 정리. custom일 땐 새 from/to를 set.
+            if (r === 'custom' && from && to) {
+              setCustomFrom(from)
+              setCustomTo(to)
+            } else {
+              setCustomFrom('')
+              setCustomTo('')
+            }
+            setRangeModalOpen(false)
+          }}
+        />
       )}
     </div>
   )
