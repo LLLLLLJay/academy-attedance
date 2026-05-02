@@ -1,10 +1,14 @@
 /**
- * /api/admin/notifications/failed — 발송 실패한 알림톡 목록 조회
+ * /api/admin/notifications/failed — 발송 문제가 있는 알림톡 목록 조회
  *
  * 가드: admin JWT 쿠키 검증 후 academy_id를 claims에서 꺼내 사용한다.
  *      쿼리스트링/본문으로 받은 academy_id는 신뢰하지 않음 — 다른 학원 데이터 노출 방지.
  *
- * GET: notification_logs.status = 'failed' 만 조회.
+ * GET: notification_logs.status in ('failed', 'retrying') 조회.
+ *      - failed   : 자동 재시도 3회까지 모두 실패한 최종 실패 행
+ *      - retrying : 재시도 대기 중이지만 pg_cron 미설치 환경에서는 영원히 멈춰 있는 행도 포함
+ *      운영자가 둘 다 수동 재전송 대상으로 인지해야 하므로 함께 노출한다.
+ *
  *      notification_logs는 academy_id를 직접 갖지 않으므로 attendance_logs!inner로
  *      조인 후 attendance_logs.academy_id로 학원을 격리한다.
  *      학생 이름/학부모 정보를 응답에 평탄화해 UI가 곧바로 그릴 수 있게 한다.
@@ -14,9 +18,13 @@ import { NextResponse } from 'next/server';
 
 import { createClient } from '@/lib/supabase/server';
 import { getAdminClaims } from '@/lib/auth/admin';
-import type { AttendanceType } from '@/lib/types/database';
+import type {
+  AttendanceType,
+  NotificationStatus,
+} from '@/lib/types/database';
 
 // 클라이언트 응답 형태 — UI에서 바로 사용할 수 있도록 student/parent를 평탄화.
+// status 필드를 함께 내려보내 UI에서 "재시도 대기" / "최종 실패" 뱃지를 분기한다.
 type FailedNotificationResponse = {
   id: string;
   attendance_id: string;
@@ -25,6 +33,7 @@ type FailedNotificationResponse = {
   parent_name: string | null;
   parent_phone: string;
   type: AttendanceType;
+  status: Extract<NotificationStatus, 'failed' | 'retrying'>;
   attempt_count: number;
   error_message: string | null;
   attempted_at: string;
@@ -34,6 +43,7 @@ type FailedNotificationResponse = {
 type JoinedRow = {
   id: string;
   attendance_id: string;
+  status: NotificationStatus;
   attempt_count: number;
   error_message: string | null;
   created_at: string;
@@ -80,6 +90,7 @@ export async function GET() {
       `
         id,
         attendance_id,
+        status,
         attempt_count,
         error_message,
         created_at,
@@ -93,7 +104,7 @@ export async function GET() {
         student_parents!inner ( id, name, phone )
       `,
     )
-    .eq('status', 'failed')
+    .in('status', ['failed', 'retrying'])
     .eq('attendance_logs.academy_id', claims.academy_id)
     .order('created_at', { ascending: false });
 
@@ -110,6 +121,9 @@ export async function GET() {
       const student = pickOne(attendance?.students ?? null);
       const parent = pickOne(row.student_parents);
       if (!attendance || !student || !parent) return null;
+      // status 필터는 in()에서 이미 좁혀졌지만 타입을 좁히기 위해 한 번 더 확인.
+      // sent/pending이 섞여 들어오는 일은 없어야 하지만 방어적으로 걸러둔다.
+      if (row.status !== 'failed' && row.status !== 'retrying') return null;
       return {
         id: row.id,
         attendance_id: row.attendance_id,
@@ -118,6 +132,7 @@ export async function GET() {
         parent_name: parent.name,
         parent_phone: parent.phone,
         type: attendance.type,
+        status: row.status,
         attempt_count: row.attempt_count,
         error_message: row.error_message,
         attempted_at: attendance.checked_at,
