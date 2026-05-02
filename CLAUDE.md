@@ -39,7 +39,9 @@ src/app
       /absences                ← 결석 처리/조회 (학생별 클래스 요일 합집합 기준)
       /absentees               ← 미출석 학생 조회 (오늘 수업 있는 학생만)
       /classes [id]            ← 클래스 CRUD + 학생 배정
-      /notifications/failed    ← 알림 실패 내역
+      /notifications
+        /failed                ← 발송 미해결 알림 목록 (failed + retrying)
+        /[id]/retry            ← 운영자 수동 재전송 (POST)
 
 src/lib
   /supabase  client.ts         ← createBrowserClient (브라우저)
@@ -81,12 +83,20 @@ src/middleware.ts              ← /admin/* 경로 JWT 가드 (Edge Runtime)
   - 클래스 미배정 학생은 결석 집계에서 제외 (분모가 0이라 결석 자체가 정의되지 않음)
 - **대시보드/미등원**: 오늘 KST 요일에 수업이 있는 활성 학생만 분모로 잡는다 (`today_expected_count`)
 
-### 알림톡 재시도 (Exponential Backoff)
+### 알림톡 자동 재시도 (Exponential Backoff)
 - 1차 실패 → 1분 후 재시도
 - 2차 실패 → 5분 후 재시도
 - 3차 실패 → 15분 후 재시도
 - 3회 모두 실패 시 → `notification_logs.status='failed'` → 관리자 페이지 "전송실패"에 표시
 - 재시도는 pg_cron이 `next_retry_at <= now()` 행을 픽업해 `/api/notify` 호출
+
+### 알림톡 수동 재전송 (`POST /api/admin/notifications/[id]/retry`)
+- **대상 상태**: `failed` 또는 `retrying`. `sent`/`pending`은 409 `NOT_RETRYABLE` 반환
+- **동작**: row를 `status='pending', attempt_count=2, next_retry_at=null, error_message=null`로 리셋 후 `/api/notify`를 **await**(동기) 호출 → 운영자에게 즉시 결과 토스트
+- **정책 — 1회 강제 재전송**: `attempt_count=2`로 두어 다음 시도가 `MAX_ATTEMPT(3)`에 도달 → 실패 시 자동 백오프 없이 곧바로 `failed` 확정. 자동 재시도 슬롯을 회복시키지 않는다 (운영자가 책임지고 1회 보낸 행이라는 의미)
+- **`next_retry_at=null`**: pg_cron이 향후 설치되어도 이 행은 픽업 대상에서 제외
+- **학원 격리**: `notification_logs` 자체엔 academy_id가 없어 `attendance_logs!inner.academy_id`로 조인 검증 — 다른 학원 ID로 호출 시 404 `NOT_FOUND` (존재 자체를 숨김)
+- **응답**: `{ sent, retrying, failed }` 카운트 그대로 전달 → UI는 `sent>0`이면 성공 토스트, 아니면 실패 토스트로 분기
 
 ### 관리자 인증 흐름
 1. `/admin/login` 페이지에서 비밀번호 입력 → `POST /api/auth`

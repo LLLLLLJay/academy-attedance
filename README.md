@@ -45,7 +45,8 @@
 | `POST /api/admin/classes` | 클래스 등록 + 학생 일괄 배정 |
 | `PATCH /api/admin/classes/[id]` | 클래스 정보 수정 + 학생 배정 전체 교체 |
 | `DELETE /api/admin/classes/[id]` | 클래스 삭제 (student_classes는 CASCADE) |
-| `GET /api/admin/notifications/failed` | 3회 실패한 알림 + 재시도 중 알림 목록 |
+| `GET /api/admin/notifications/failed` | 발송 미해결 알림 목록 (status: failed + retrying) |
+| `POST /api/admin/notifications/[id]/retry` | 운영자 수동 재전송 — 1회 강제, 자동 재시도 슬롯 회복 안 함 (정책 상세는 [CLAUDE.md](./CLAUDE.md) 참조) |
 
 ## 시작하기
 
@@ -57,7 +58,7 @@ npm install
 
 ### 2. 환경변수 설정
 
-프로젝트 루트에 `.env.local` 파일 생성. 카카오 비즈채널 검수 전이라면 `SOLAPI_PFID` / `SOLAPI_TEMPLATE_ID_*` 는 비워두면 알림톡 호출 시 `SOLAPI_TEMPLATE_ENV_MISSING`으로 응답되며, 출석 기록 자체는 정상 처리됩니다.
+프로젝트 루트에 `.env.local` 파일 생성. 카카오 비즈채널 검수 완료 후 솔라피 콘솔에서 발급받은 `SOLAPI_PFID` / `SOLAPI_TEMPLATE_ID_*` 값을 채워 넣어야 알림톡이 발송됩니다. 비어있으면 알림톡 호출이 `SOLAPI_TEMPLATE_ENV_MISSING`으로 응답되지만 출석 기록 자체는 정상 처리됩니다 (개발 환경에서 알림 미발송 운영 가능).
 
 ```env
 # Supabase ─────────────────────────────────────────────

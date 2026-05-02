@@ -1,6 +1,6 @@
 # Supabase 스키마 설계 — 학원 출석체크 서비스
 
-**문서 버전** v0.2 | **작성일** 2026.04.28
+**문서 버전** v0.3 | **작성일** 2026.04.28
 
 ---
 
@@ -46,7 +46,7 @@ academies
   -- 2. students (학생)
   create table students (
     id          uuid primary key default gen_random_uuid(),
-    academy_id  uuid references academies(id) on delete cascade,
+    academy_id  uuid not null references academies(id) on delete cascade,
     name        text not null,
     is_active   boolean default true,      -- 퇴원 시 소프트 삭제
     created_at  timestamptz default now()
@@ -55,7 +55,7 @@ academies
   -- 3. student_parents (학부모 연락처, 1학생 N명)
   create table student_parents (
     id           uuid primary key default gen_random_uuid(),
-    student_id   uuid references students(id) on delete cascade,
+    student_id   uuid not null references students(id) on delete cascade,
     name         text,                     -- 예: 엄마, 아빠, 할머니
     phone        text not null,            -- 전체 번호
     phone_last4  text generated always as
@@ -74,10 +74,10 @@ academies
 
   create table attendance_logs (
     id          uuid primary key default gen_random_uuid(),
-    student_id  uuid references students(id) on delete cascade,
-    academy_id  uuid references academies(id) on delete cascade,
+    student_id  uuid not null references students(id) on delete cascade,
+    academy_id  uuid not null references academies(id) on delete cascade,
     type        attendance_type not null,
-    checked_at  timestamptz default now(),
+    checked_at  timestamptz not null default now(),
     memo        text,                      -- 결석 행의 보강 메모 (원장 입력)
     created_at  timestamptz default now()
   );
@@ -120,10 +120,10 @@ academies
 
   create table notification_logs (
     id             uuid primary key default gen_random_uuid(),
-    attendance_id  uuid references attendance_logs(id) on delete cascade,
-    parent_id      uuid references student_parents(id) on delete cascade,
-    status         notification_status default 'pending',
-    attempt_count  int default 0,          -- 재시도 횟수 (최대 3)
+    attendance_id  uuid not null references attendance_logs(id) on delete cascade,
+    parent_id      uuid not null references student_parents(id) on delete cascade,
+    status         notification_status not null default 'pending',
+    attempt_count  int not null default 0, -- 재시도 횟수 (최대 3)
     next_retry_at  timestamptz,            -- 다음 재시도 예정 시각
     sent_at        timestamptz,            -- 발송 성공 시각
     error_message  text,                   -- 실패 사유
@@ -290,4 +290,3 @@ order by d::date desc, s.name asc;
 
 - [ ] Supabase RLS(Row Level Security) 정책 설계
 - [ ] notification_logs 재시도 스케줄러 (pg_cron + Edge Function) 설계
-- [ ] 관리자 인증 방식 구체화 (JWT 또는 세션 쿠키)
