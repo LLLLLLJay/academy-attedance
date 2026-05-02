@@ -15,7 +15,6 @@ export const TOKENS = {
   cooldownSoft: '#F0EDFA',
 } as const
 
-export const ACADEMY_NAME = '새벽별 학원'
 export const COUNTDOWN_SECONDS = 3
 export const COOLDOWN_MS = 5 * 60 * 1000
 export const PIN_MASKING = true

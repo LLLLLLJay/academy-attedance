@@ -10,8 +10,6 @@ import LogoutButton from './LogoutButton'
 
 type Page = 'dashboard' | 'records' | 'students' | 'classes' | 'absences' | 'failures'
 
-const ACADEMY_NAME = '엘 영어학원'
-
 // ─── SVG icon primitives ────────────────────────────────────────────────────
 
 function Icon({ name, size = 16, strokeWidth = 1.7 }: { name: string; size?: number; strokeWidth?: number }) {
@@ -37,24 +35,6 @@ function Icon({ name, size = 16, strokeWidth = 1.7 }: { name: string; size?: num
       strokeLinecap="round" strokeLinejoin="round">
       {paths[name]}
     </svg>
-  )
-}
-
-function Avatar({ name, kind = 'neutral', size = 36 }: { name: string; kind?: 'warm' | 'cool' | 'neutral'; size?: number }) {
-  const styles = {
-    warm: { bg: '#FFF1EA', fg: '#FF6B35' },
-    cool: { bg: '#E9F0FF', fg: '#2B6CFF' },
-    neutral: { bg: '#F2F2EC', fg: '#5B5B5B' },
-  }[kind]
-  return (
-    <div style={{
-      width: size, height: size, borderRadius: 10, flexShrink: 0,
-      background: styles.bg, color: styles.fg,
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      fontSize: size * 0.38, fontWeight: 700,
-    }}>
-      {name.slice(-1)}
-    </div>
   )
 }
 
@@ -101,8 +81,16 @@ type RecentLog = {
   student_name: string
   type: 'checkin' | 'checkout'
   checked_at: string
+  // 알림이 발송된 학부모 1명의 정보 — is_primary 우선 선택, 없으면 첫 번째.
+  // 발송 이력 자체가 없으면 null로 떨어져 UI에서 "(정보 없음)"으로 표시.
+  parent_name: string | null
+  parent_phone: string | null
 }
 type DashboardSummary = {
+  // 사이드바/모바일 헤더에 표시할 학원명. claims로 격리된 academies.name.
+  // why: 학원명을 별도 endpoint로 분리하지 않고 dashboard에 묶어 라운드트립 절감.
+  //      AdminPage가 마운트 시 한 번 호출 → 사이드바와 대시보드 카드가 같은 fetch를 공유.
+  academy_name: string
   total_active_students: number
   // 오늘 KST 요일에 수업이 있는 활성 학생 수 — 등원/미등원 % 계산의 분모.
   today_expected_count: number
@@ -111,24 +99,33 @@ type DashboardSummary = {
   recent: RecentLog[]
 }
 
-// ISO timestamptz → 화면 표시용 "HH:MM" (브라우저 로컬 = 한국 사용자 KST).
-function formatTime(iso: string): string {
+// ISO timestamptz → 화면 표시용 "YY.MM.DD (요일) HH:MM" (브라우저 로컬 = 한국 사용자 KST).
+// 예: "26.05.01 (수) 21:12"
+const DAY_NAMES = ['일', '월', '화', '수', '목', '금', '토'] as const
+function formatDateTime(iso: string): string {
   const d = new Date(iso)
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  const year = String(d.getFullYear()).slice(-2)
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const date = String(d.getDate()).padStart(2, '0')
+  const dayName = DAY_NAMES[d.getDay()]
+  const hours = String(d.getHours()).padStart(2, '0')
+  const minutes = String(d.getMinutes()).padStart(2, '0')
+  return `${year}.${month}.${date} (${dayName}) ${hours}:${minutes}`
 }
 
-function AdminDashboard({ failCount, setActivePage }: { failCount: number; setActivePage: (p: Page) => void }) {
+function AdminDashboard({ failCount, setActivePage, summary, summaryError }: {
+  failCount: number
+  setActivePage: (p: Page) => void
+  // dashboard 응답은 AdminPage(부모)가 보유 — 사이드바 학원명 표시와 동일 fetch를 공유한다.
+  // 페이지 전환 시 unmount/remount 되더라도 부모 state에 유지되어 재호출 부담이 없다.
+  summary: DashboardSummary | null
+  summaryError: string | null
+}) {
   // 미등원 학생은 Supabase에서 실시간 조회 (당일 checkin 기록 없는 활성 학생).
   // why: 상세 리스트는 결석 관리 탭이 담당하고 대시보드에서는 카운트(StatCard)와
   //      알림 배너만 보여주므로 loading/error 별도 표시 없이 카운트만 보관한다.
   //      실패 시에도 0명으로 표시되며, 사용자에겐 결석 관리 탭에서 정확한 정보가 노출된다.
   const [absentees, setAbsentees] = useState<Absentee[]>([])
-
-  // 대시보드 요약(카운트 + 최근 활동)은 별도 API에서 한 번에 받아와 round-trip을 절감한다.
-  // 미등원 카드는 별도 endpoint를 유지 — KST 경계 + students 안티조인이 카운트 쿼리와 다르고,
-  // 이미 안정화된 absentees API를 그대로 재사용하는 편이 변경 범위를 줄인다.
-  const [summary, setSummary] = useState<DashboardSummary | null>(null)
-  const [summaryError, setSummaryError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -141,30 +138,6 @@ function AdminDashboard({ failCount, setActivePage }: { failCount: number; setAc
         setAbsentees(body.absentees)
       } catch {
         // 카운트 조회 실패는 치명적이지 않음 — 0명으로 두고 결석 관리 탭으로 유도.
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      try {
-        const res = await fetch('/api/admin/dashboard', { cache: 'no-store' })
-        if (cancelled) return
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}))
-          throw new Error(body?.error ?? `HTTP ${res.status}`)
-        }
-        const body = (await res.json()) as DashboardSummary
-        if (cancelled) return
-        setSummary(body)
-        setSummaryError(null)
-      } catch (err) {
-        if (cancelled) return
-        setSummaryError(err instanceof Error ? err.message : '대시보드 정보를 불러오지 못했습니다')
       }
     })()
     return () => {
@@ -213,7 +186,7 @@ function AdminDashboard({ failCount, setActivePage }: { failCount: number; setAc
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-sm font-bold" style={{ color: '#E5484D' }}>미등원 학생 {absentCount}명</p>
-            <p className="text-xs mt-0.5" style={{ color: '#5B5B5B' }}>결석 관리 탭에서 보강 메모를 기록하세요 →</p>
+            <p className="text-xs mt-0.5" style={{ color: '#5B5B5B' }}>결석 관리 탭에서 메모를 기록하세요 →</p>
           </div>
         </button>
       )}
@@ -251,17 +224,37 @@ function AdminDashboard({ failCount, setActivePage }: { failCount: number; setAc
           recent.map((r, i) => (
             <div key={r.id} className="flex items-center gap-3 px-5 py-3"
               style={{ borderBottom: i < recent.length - 1 ? '1px solid #F2F2EC' : 'none' }}>
-              <Avatar name={r.student_name} kind={r.type === 'checkout' ? 'cool' : 'warm'} size={36} />
+              {/* 좌측 배지: Avatar 대신 등원/하원 텍스트 뱃지. warm/cool 색상 토큰 재사용. */}
+              <div style={{
+                width: 36, height: 36, borderRadius: 10, flexShrink: 0,
+                background: r.type === 'checkout' ? '#E9F0FF' : '#FFF1EA',
+                color: r.type === 'checkout' ? '#2B6CFF' : '#FF6B35',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 12, fontWeight: 700,
+              }}>
+                {r.type === 'checkout' ? '하원' : '등원'}
+              </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold" style={{ color: '#141414' }}>{r.student_name}</p>
-                <p className="text-xs mt-0.5" style={{ color: '#9A9A9A' }}>
-                  {r.type === 'checkout' ? '하원' : '등원'}
+                <p className="text-sm font-semibold truncate" style={{ color: '#141414' }}>{r.student_name}</p>
+                <p className="text-xs mt-0.5 truncate" style={{ color: '#9A9A9A' }}>
+                  {r.parent_name && r.parent_phone
+                    ? `→ ${r.parent_name} ${r.parent_phone}`
+                    : '(정보 없음)'}
                 </p>
               </div>
               <div className="text-right">
-                <p className="text-xs font-bold tabular-nums" style={{ color: r.type === 'checkout' ? '#2B6CFF' : '#FF6B35' }}>
-                  {formatTime(r.checked_at)}
-                </p>
+                {/* 시간 뱃지: 포인트 칼라 제거하고 중립 회색 톤으로 정보 전달에 집중. */}
+                <div className="tabular-nums" style={{
+                  background: '#F2F2EC',
+                  color: '#5B5B5B',
+                  padding: '8px 12px',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                  fontWeight: 500,
+                  whiteSpace: 'nowrap',
+                }}>
+                  {formatDateTime(r.checked_at)}
+                </div>
               </div>
             </div>
           ))
@@ -275,12 +268,14 @@ function AdminDashboard({ failCount, setActivePage }: { failCount: number; setAc
 
 type NavItem = { id: Page; label: string; iconName: string; badge?: number }
 
-function SidebarNav({ nav, activePage, setActivePage, sidebarOpen, setSidebarOpen }: {
+function SidebarNav({ nav, activePage, setActivePage, sidebarOpen, setSidebarOpen, academyName }: {
   nav: NavItem[]
   activePage: Page
   setActivePage: (p: Page) => void
   sidebarOpen: boolean
   setSidebarOpen: (open: boolean) => void
+  // null이면 dashboard fetch 미완료/실패 — UI에서 placeholder("...") 노출.
+  academyName: string | null
 }) {
   const w = sidebarOpen ? 240 : 72
   return (
@@ -291,7 +286,7 @@ function SidebarNav({ nav, activePage, setActivePage, sidebarOpen, setSidebarOpe
           style={{ background: '#141414' }}>엘</div>
         {sidebarOpen && (
           <div className="min-w-0">
-            <p className="text-sm font-bold truncate" style={{ color: '#141414' }}>{ACADEMY_NAME}</p>
+            <p className="text-sm font-bold truncate" style={{ color: '#141414' }}>{academyName ?? '...'}</p>
             <p className="text-xs" style={{ color: '#9A9A9A' }}>관리자 콘솔</p>
           </div>
         )}
@@ -422,6 +417,36 @@ export default function AdminPage() {
     }
   }, [])
 
+  // 대시보드 요약 — 사이드바/모바일 헤더(학원명) + 대시보드 페이지(카드/최근 활동)가 공유.
+  // why: 자식(AdminDashboard)이 fetch하면 페이지 전환마다 unmount/remount 되며 재호출되고,
+  //      사이드바는 자식의 state에 접근할 수 없다. 부모에서 1회 fetch 후 prop으로 흘려보내
+  //      양쪽이 같은 데이터를 본다.
+  const [summary, setSummary] = useState<DashboardSummary | null>(null)
+  const [summaryError, setSummaryError] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/api/admin/dashboard', { cache: 'no-store' })
+        if (cancelled) return
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}))
+          throw new Error(body?.error ?? `HTTP ${res.status}`)
+        }
+        const body = (await res.json()) as DashboardSummary
+        if (cancelled) return
+        setSummary(body)
+        setSummaryError(null)
+      } catch (err) {
+        if (cancelled) return
+        setSummaryError(err instanceof Error ? err.message : '대시보드 정보를 불러오지 못했습니다')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const nav: NavItem[] = [
     { id: 'dashboard', label: '대시보드', iconName: 'dashboard' },
     { id: 'records', label: '출석 기록', iconName: 'list' },
@@ -432,7 +457,14 @@ export default function AdminPage() {
   ]
 
   const content = {
-    dashboard: <AdminDashboard failCount={failBadge} setActivePage={setActivePage} />,
+    dashboard: (
+      <AdminDashboard
+        failCount={failBadge}
+        setActivePage={setActivePage}
+        summary={summary}
+        summaryError={summaryError}
+      />
+    ),
     records: <AttendanceTable />,
     students: <StudentList />,
     classes: <ClassManagement />,
@@ -449,7 +481,7 @@ export default function AdminPage() {
             <div className="w-7.5 h-7.5 rounded-lg flex items-center justify-center text-white font-bold text-sm"
               style={{ background: '#141414' }}>엘</div>
             <div>
-              <p className="text-sm font-bold" style={{ color: '#141414' }}>{ACADEMY_NAME}</p>
+              <p className="text-sm font-bold" style={{ color: '#141414' }}>{summary?.academy_name ?? '...'}</p>
               <p className="text-xs" style={{ color: '#9A9A9A' }}>관리자</p>
             </div>
           </div>
@@ -470,6 +502,7 @@ export default function AdminPage() {
       <SidebarNav
         nav={nav} activePage={activePage} setActivePage={setActivePage}
         sidebarOpen={sidebarOpen} setSidebarOpen={setSidebarOpen}
+        academyName={summary?.academy_name ?? null}
       />
       <main className="flex-1 min-w-0 p-7 lg:p-9">{content}</main>
     </div>

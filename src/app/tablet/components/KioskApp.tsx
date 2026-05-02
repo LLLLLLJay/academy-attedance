@@ -7,7 +7,7 @@ import SelectScreen from './SelectScreen'
 import DoneScreen from './DoneScreen'
 import NotFoundScreen from './NotFoundScreen'
 import CooldownScreen from './CooldownScreen'
-import { ACADEMY_NAME, COUNTDOWN_SECONDS, PIN_MASKING, TOKENS } from '../lib/tokens'
+import { COUNTDOWN_SECONDS, PIN_MASKING, TOKENS } from '../lib/tokens'
 import type { CooldownInfo, KioskMatch, KioskStudent, Mode, Screen } from '../lib/types'
 
 // ── 타입: /api/attendance 응답 ────────────────────────────────────
@@ -38,6 +38,10 @@ type AttendanceResponse =
 const modeToType = (m: Mode): 'checkin' | 'checkout' =>
   m === 'in' ? 'checkin' : 'checkout'
 
+// /api/attendance 호출 시 네트워크 타임아웃 (ms).
+// why: 무한 대기로 "확인 중…" 화면이 영원히 멈추는 것을 막기 위해 명시적 상한.
+const ATTENDANCE_TIMEOUT_MS = 6000
+
 export default function KioskApp() {
   const [screen, setScreen] = useState<Screen>('main')
   const [mode, setMode] = useState<Mode>('in')
@@ -47,6 +51,14 @@ export default function KioskApp() {
   const [cooldownInfo, setCooldownInfo] = useState<CooldownInfo | null>(null)
   const [countdown, setCountdown] = useState(COUNTDOWN_SECONDS)
   const [scale, setScale] = useState(1)
+  // 모든 화면(Main/Keypad/Done 등)의 헤더에 표시할 학원명.
+  // why: 과거에 tokens.ts에 하드코딩된 상수를 import 했으나, DB(academies.name)가 단일 진실원이고
+  //      알림톡의 #{학원명} 변수도 거기서 읽으므로 같은 출처에서 가져와 표시 일관성을 보장한다.
+  //      부팅 직후 fetch 완료 전에는 빈 문자열로 두어 헤더 학원명만 잠깐 비고, "엘" 배지는 그대로 표시.
+  const [academyName, setAcademyName] = useState('')
+  // 키패드 화면에서 4자리 입력 직후 결과 화면 전까지 "확인 중…" 인디케이터를 띄우기 위한 상태.
+  // why: ref만으로는 렌더에 반영되지 않아 사용자가 멈춘 화면으로 오인함 (네트워크 RTT + 서버 처리에 ~1초 소요).
+  const [submitting, setSubmitting] = useState(false)
 
   // 동시 키 입력으로 동일한 4자리에 대해 두 번 POST 나가는 것을 막기 위한 가드.
   // why: setTimeout(260) 사이에 빠른 추가 입력이 들어오면 race가 날 수 있음.
@@ -58,6 +70,7 @@ export default function KioskApp() {
     setMatches([])
     setCurrentStudent(null)
     setCooldownInfo(null)
+    setSubmitting(false)
     submittingRef.current = false
   }, [])
 
@@ -94,6 +107,26 @@ export default function KioskApp() {
     return () => window.removeEventListener('resize', compute)
   }, [])
 
+  // 부팅 시 학원명을 1회 fetch — /api/academy는 NEXT_PUBLIC_ACADEMY_ID(없으면 첫 row) 정책을 따라
+  // /api/attendance와 동일한 학원을 가리킨다. 실패해도 화면은 정상 동작 — 헤더 학원명만 빈칸.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/api/academy', { cache: 'no-store' })
+        if (!res.ok || cancelled) return
+        const body = (await res.json()) as { id: string; name: string }
+        if (cancelled) return
+        setAcademyName(body.name)
+      } catch {
+        // 키오스크 부팅 시 일시적 네트워크 실패 — 헤더 학원명만 비고 출석 기능은 정상.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   // ── /api/attendance 호출 헬퍼 ─────────────────────────────────────
   //
   // phone_last4 + type (+ 선택 시 student_id) 만 실어 POST.
@@ -101,18 +134,27 @@ export default function KioskApp() {
   // why: 태블릿엔 로그인이 없어 학원 식별 정보 출처가 없음.
   const callAttendance = useCallback(
     async (phoneLast4: string, type: 'checkin' | 'checkout', studentId?: string) => {
-      const res = await fetch('/api/attendance', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          phone_last4: phoneLast4,
-          type,
-          ...(studentId ? { student_id: studentId } : {}),
-        }),
-      })
-      // 본문은 항상 JSON. 비즈니스 분기 응답도 200이라서 res.ok로 검증 후 body로 분기.
-      const json = (await res.json().catch(() => null)) as AttendanceResponse | null
-      return { ok: res.ok, status: res.status, body: json }
+      // AbortController로 네트워크 타임아웃 보강.
+      // why: fetch 기본은 무한 대기 → 망 단절 시 "확인 중…" 화면이 영원히 멈춤.
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), ATTENDANCE_TIMEOUT_MS)
+      try {
+        const res = await fetch('/api/attendance', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            phone_last4: phoneLast4,
+            type,
+            ...(studentId ? { student_id: studentId } : {}),
+          }),
+          signal: controller.signal,
+        })
+        // 본문은 항상 JSON. 비즈니스 분기 응답도 200이라서 res.ok로 검증 후 body로 분기.
+        const json = (await res.json().catch(() => null)) as AttendanceResponse | null
+        return { ok: res.ok, status: res.status, body: json }
+      } finally {
+        clearTimeout(timer)
+      }
     },
     [],
   )
@@ -182,6 +224,8 @@ export default function KioskApp() {
     const next = pin + k
     setPin(next)
     if (next.length === 4) {
+      // 4자리 채워지자마자 "확인 중…" 인디케이터 ON. 사용자에게 즉시 시각적 피드백을 준다.
+      setSubmitting(true)
       // 260ms 지연: 마지막 키 애니메이션이 끝난 뒤 화면 전환되도록 (UX).
       setTimeout(async () => {
         if (submittingRef.current) return
@@ -194,6 +238,7 @@ export default function KioskApp() {
           setScreen('notfound')
         } finally {
           submittingRef.current = false
+          setSubmitting(false)
         }
       }, 260)
     }
@@ -208,6 +253,7 @@ export default function KioskApp() {
     }
     if (submittingRef.current) return
     submittingRef.current = true
+    setSubmitting(true)
     try {
       // 두 번째 호출: 같은 4자리 + 선택된 student_id로 단일 학생 확정.
       const { ok, body } = await callAttendance(pin, modeToType(mode), match.student.id)
@@ -217,6 +263,7 @@ export default function KioskApp() {
       setScreen('notfound')
     } finally {
       submittingRef.current = false
+      setSubmitting(false)
     }
   }
 
@@ -232,7 +279,7 @@ export default function KioskApp() {
 
   let screenEl: React.ReactNode = null
   if (screen === 'main') {
-    screenEl = <MainScreen onPick={onPickMode} academyName={ACADEMY_NAME} />
+    screenEl = <MainScreen onPick={onPickMode} academyName={academyName} />
   } else if (screen === 'keypad') {
     screenEl = (
       <KeypadScreen
@@ -241,7 +288,8 @@ export default function KioskApp() {
         masking={PIN_MASKING}
         onKey={onKey}
         onBack={resetToMain}
-        academyName={ACADEMY_NAME}
+        academyName={academyName}
+        submitting={submitting}
       />
     )
   } else if (screen === 'select') {
@@ -251,7 +299,7 @@ export default function KioskApp() {
         matches={matches}
         onPick={onPickStudent}
         onBack={backFromSelect}
-        academyName={ACADEMY_NAME}
+        academyName={academyName}
       />
     )
   } else if (screen === 'done' && currentStudent) {
@@ -260,7 +308,7 @@ export default function KioskApp() {
         mode={mode}
         student={currentStudent}
         countdown={Math.max(0, countdown)}
-        academyName={ACADEMY_NAME}
+        academyName={academyName}
       />
     )
   } else if (screen === 'notfound') {
@@ -270,7 +318,7 @@ export default function KioskApp() {
         onRetry={retryFromError}
         onBack={resetToMain}
         countdown={Math.max(0, countdown)}
-        academyName={ACADEMY_NAME}
+        academyName={academyName}
       />
     )
   } else if (screen === 'cooldown' && cooldownInfo) {
@@ -280,7 +328,7 @@ export default function KioskApp() {
         info={cooldownInfo}
         onBack={resetToMain}
         countdown={Math.max(0, countdown)}
-        academyName={ACADEMY_NAME}
+        academyName={academyName}
       />
     )
   }
