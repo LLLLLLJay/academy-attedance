@@ -501,12 +501,10 @@ export default function ClassManagement() {
                 </span>
               </div>
               <div>
-                <p className="text-xs mb-1.5" style={{ color: '#9A9A9A' }}>수업 요일</p>
                 <WeekdayBadges weekdays={c.weekdays} />
               </div>
               {c.students.length > 0 && (
                 <div>
-                  <p className="text-xs mb-1.5" style={{ color: '#9A9A9A' }}>소속 학생</p>
                   <div className="flex flex-wrap gap-1">
                     {c.students.slice(0, 6).map((s) => (
                       <span key={s.id} className="inline-flex items-center px-2 py-0.5 rounded-full text-xs"

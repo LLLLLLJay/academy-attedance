@@ -22,7 +22,7 @@ export default function MainScreen({ onPick, academyName }: Props) {
       }}>
         <div style={{ textAlign: 'center' }}>
           <div style={{ fontSize: 36, fontWeight: 700, letterSpacing: '-0.02em' }}>
-            오늘도 반가워요
+            오늘도 반가워요 🙂
           </div>
           <div style={{ fontSize: 20, color: TOKENS.inkSoft, marginTop: 10 }}>
             부모님 연락처 뒷 4자리로 체크인/아웃 해주세요
