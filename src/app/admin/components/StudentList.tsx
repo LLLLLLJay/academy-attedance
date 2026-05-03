@@ -3,8 +3,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 // 보호자 역할 드롭다운 옵션 — DB에 별도 컬럼이 없으므로 UI 상수로만 사용.
-// "엄마/아빠/할머니" 외 임의 입력은 PARENT_ROLES[0]로 정규화돼 저장됨.
-const PARENT_ROLES = ['엄마', '아빠', '할머니'] as const
+// 학교/학원 행정 표준 용어로 통일. "보호자"는 할머니·할아버지·이모 등 비부모 가족까지 포괄.
+// 기존 데이터의 "엄마/아빠/할머니"는 DB에 그대로 남으며, 모달에서 select가 첫 옵션(어머니)로
+// fallback 표시될 뿐 사용자가 select를 직접 건드리지 않으면 저장 시 원본 값이 유지된다.
+const PARENT_ROLES = ['어머니', '아버지', '보호자'] as const
 
 // API 응답 형태 — /api/admin/students 라우트와 1:1 매칭.
 // phone_last4는 DB의 generated column이라 클라이언트에서 직접 만들지 않고 응답에서만 받는다.
@@ -64,15 +66,6 @@ function Icon({ name, size = 16, strokeWidth = 1.7 }: { name: string; size?: num
   )
 }
 
-function Avatar({ name, kind = 'neutral', size = 32 }: { name: string; kind?: 'warm' | 'neutral'; size?: number }) {
-  const c = kind === 'warm' ? { bg: '#FFF1EA', fg: '#FF6B35' } : { bg: '#F2F2EC', fg: '#5B5B5B' }
-  return (
-    <div style={{ width: size, height: size, borderRadius: 8, background: c.bg, color: c.fg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: size * 0.38, fontWeight: 700, flexShrink: 0 }}>
-      {name.slice(-1)}
-    </div>
-  )
-}
-
 function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
   return (
     <button onClick={() => onChange(!value)}
@@ -84,11 +77,14 @@ function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) =>
   )
 }
 
-// created_at(timestamptz ISO) → "YYYY.MM" 표시 형식.
-// DB 스키마엔 별도 등록월 컬럼이 없어 created_at에서 파생.
+// created_at(timestamptz ISO) → "YYYY.MM.DD" 표시 형식.
+// DB 스키마엔 별도 등록일 컬럼이 없어 created_at에서 파생.
 function formatJoined(iso: string): string {
   const d = new Date(iso)
-  return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}`
+  const year = d.getFullYear()
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const date = String(d.getDate()).padStart(2, '0')
+  return `${year}.${month}.${date}`
 }
 
 function ParentRowEditor({ parent, onUpdate, onRemove, onSetPrimary, canRemove }: {
@@ -449,31 +445,28 @@ export default function StudentList() {
                 return (
                   <tr key={s.id} style={{ borderTop: '1px solid #F2F2EC', height: 56 }}>
                     <td style={{ padding: '12px 16px', verticalAlign: 'middle' }}>
-                      <div className="flex items-center gap-2.5">
-                        <Avatar name={s.name} kind={s.is_active ? 'warm' : 'neutral'} size={32} />
-                        <div className="min-w-0">
-                          <span className="font-semibold" style={{ color: '#141414' }}>{s.name}</span>
-                          {/* 클래스 칩 — 미배정이면 회색 안내, 1개 이상이면 반 이름 칩으로 노출. */}
-                          {s.classes.length === 0 ? (
-                            <p className="text-xs mt-0.5" style={{ color: '#9A9A9A' }}>반 미배정</p>
-                          ) : (
-                            <div className="flex flex-wrap gap-1 mt-1">
-                              {s.classes.slice(0, 3).map((c) => (
-                                <span key={c.id}
-                                  className="inline-flex items-center px-1.5 py-0.5 rounded text-xs"
-                                  style={{ background: '#E9F0FF', color: '#2B6CFF' }}>
-                                  {c.name}
-                                </span>
-                              ))}
-                              {s.classes.length > 3 && (
-                                <span className="inline-flex items-center text-xs"
-                                  style={{ color: '#9A9A9A' }}>
-                                  +{s.classes.length - 3}
-                                </span>
-                              )}
-                            </div>
-                          )}
-                        </div>
+                      <div className="min-w-0">
+                        <span className="font-semibold" style={{ color: '#141414' }}>{s.name}</span>
+                        {/* 클래스 칩 — 미배정이면 회색 안내, 1개 이상이면 반 이름 칩으로 노출. */}
+                        {s.classes.length === 0 ? (
+                          <p className="text-xs mt-0.5" style={{ color: '#9A9A9A' }}>반 미배정</p>
+                        ) : (
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {s.classes.slice(0, 3).map((c) => (
+                              <span key={c.id}
+                                className="inline-flex items-center px-1.5 py-0.5 rounded text-xs"
+                                style={{ background: '#E9F0FF', color: '#2B6CFF' }}>
+                                {c.name}
+                              </span>
+                            ))}
+                            {s.classes.length > 3 && (
+                              <span className="inline-flex items-center text-xs"
+                                style={{ color: '#9A9A9A' }}>
+                                +{s.classes.length - 3}
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </td>
                     <td style={{ padding: '12px 16px', verticalAlign: 'middle' }}>
