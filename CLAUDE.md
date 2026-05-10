@@ -12,8 +12,9 @@
 |---|---|
 | 프론트엔드 | Next.js 16 (App Router) + React 19 + TypeScript + Tailwind CSS v4 |
 | 백엔드 / DB | Supabase (PostgreSQL + RLS) |
-| Supabase 클라이언트 | `@supabase/ssr` — server/browser 분리 |
-| 관리자 인증 | bcryptjs(비밀번호 해시) + jose(JWT, Edge·Node 호환) |
+| Supabase 클라이언트 | 서버: `@supabase/supabase-js` + service_role (RLS 우회) / 브라우저: 미사용 |
+| 관리자/태블릿 인증 | bcryptjs(비밀번호 해시) + jose(JWT, Edge·Node 호환) — admin/tablet role 분리 |
+| Rate limit | Upstash Redis (`@upstash/ratelimit`) — auth/attendance/retry 라우트 |
 | 배포 | Vercel |
 | 알림 발송 | 솔라피(Solapi) — 카카오 알림톡 + SMS 자동 대체 발송 |
 | 재시도 스케줄러 | Supabase pg_cron + `/api/notify` |
@@ -26,12 +27,14 @@
 ```
 src/app
   /tablet                      ← 학생용 출석 화면 (키오스크, 가로 고정, 'use client')
+    /login                     ← 키오스크 비밀번호 로그인 (선생님 1회 입력)
   /admin                       ← 원장용 관리자 페이지 (반응형, 'use client')
     /login                     ← 관리자 로그인 페이지
   /api
-    /attendance                ← 출석 처리 (POST)
-    /notify                    ← 솔라피 알림톡 발송 (POST)
+    /attendance                ← 출석 처리 (POST, tablet/admin 토큰 + rate limit 필수)
+    /notify                    ← 솔라피 알림톡 발송 (POST, x-cron-secret 헤더 필수)
     /auth                      ← 관리자 로그인(POST) / 로그아웃(DELETE)
+      /tablet                  ← 키오스크 로그인(POST) / 로그아웃(DELETE)
     /admin                     ← 관리자 전용 (모두 JWT 쿠키 검증)
       /dashboard               ← 오늘 출결 요약
       /students [id]           ← 학생 CRUD
@@ -41,16 +44,18 @@ src/app
       /classes [id]            ← 클래스 CRUD + 학생 배정
       /notifications
         /failed                ← 발송 미해결 알림 목록 (failed + retrying)
-        /[id]/retry            ← 운영자 수동 재전송 (POST)
+        /[id]/retry            ← 운영자 수동 재전송 (POST, rate limit)
 
 src/lib
-  /supabase  client.ts         ← createBrowserClient (브라우저)
-             server.ts         ← createServerClient + cookies (SSR/라우트)
-  /auth      jwt.ts            ← signAdminToken / verifyAdminToken (jose, HS256)
-             admin.ts          ← getAdminClaims (쿠키 → claims 헬퍼)
+  /supabase  server.ts         ← createSupabaseClient + service_role 키 (RLS 우회, 서버 전용)
+  /auth      jwt.ts            ← signToken/verifyToken (admin·tablet role) + 하위 호환 별칭
+             admin.ts          ← getAdminClaims (admin 쿠키 → claims, role==='admin' 강제)
+             tablet.ts         ← getTabletOrAdminClaims (둘 중 하나라도 통과)
+             cron.ts           ← isValidCronSecret (서버↔서버 공유 비밀)
+  /ratelimit.ts                ← Upstash 기반 rate limit 정책 + getClientIp
   /types     database.ts       ← Supabase 생성 타입
 
-src/middleware.ts              ← /admin/* 경로 JWT 가드 (Edge Runtime)
+src/middleware.ts              ← /admin/* (admin) + /tablet/* (admin OR tablet) JWT 가드 (Edge)
 ```
 
 ---
@@ -58,8 +63,9 @@ src/middleware.ts              ← /admin/* 경로 JWT 가드 (Edge Runtime)
 ## 핵심 비즈니스 로직
 
 ### 출석 체크 흐름 (`POST /api/attendance`)
-1. 본문 파싱 + 형식 검증 (`phone_last4` 4자리, `type` enum)
-2. `academy_id` 결정 — 우선순위: `NEXT_PUBLIC_ACADEMY_ID` → `body.academy_id` → academies 첫 row
+0. 인증 게이트 — `tablet` 또는 `admin` 쿠키 필수, claims에서 `academy_id` 추출 (외부 주입 통로 차단)
+1. Rate limit — IP 30/min × 토큰(=academy_id) 60/min 두 차원 동시 체크
+2. 본문 파싱 + 형식 검증 (`phone_last4` 4자리, `type` enum) — `academy_id` 본문 필드는 더 이상 받지 않음
 3. `student_parents.phone_last4`로 후보 학생 ID 수집 (Set으로 중복 제거)
 4. `students`에서 `academy_id` + `is_active=true`로 필터링
    - 0명 → `NOT_FOUND` / 2명 이상 → `MULTIPLE`(이름 목록 반환) / 1명 → 다음 단계
@@ -99,13 +105,32 @@ src/middleware.ts              ← /admin/* 경로 JWT 가드 (Edge Runtime)
 - **응답**: `{ sent, retrying, failed }` 카운트 그대로 전달 → UI는 `sent>0`이면 성공 토스트, 아니면 실패 토스트로 분기
 
 ### 관리자 인증 흐름
-1. `/admin/login` 페이지에서 비밀번호 입력 → `POST /api/auth`
+1. `/admin/login` 페이지에서 비밀번호 입력 → `POST /api/auth` (rate limit: IP 5/min)
 2. `academies` 첫 row의 `admin_password_hash`와 `bcrypt.compare`
-3. 일치 시 `signAdminToken({ academy_id })`로 HS256 JWT 발급 (7일)
+3. 일치 시 `signToken({ academy_id, role: 'admin' })`로 HS256 JWT 발급 (7일)
 4. httpOnly + secure(prod) + sameSite=lax 쿠키(`admin_token`)에 저장
-5. `middleware.ts`가 모든 `/admin/*` 진입 시 쿠키 검증 → 실패 시 `/admin/login`으로 리다이렉트
-6. `/api/admin/*` 라우트는 미들웨어 매처 밖이므로 핸들러 안에서 `getAdminClaims()`로 직접 검증
+5. `middleware.ts`가 모든 `/admin/*` 진입 시 쿠키 + role 검증 → 실패 시 `/admin/login`으로 리다이렉트
+6. `/api/admin/*` 라우트는 미들웨어 매처 밖이므로 핸들러 안에서 `getAdminClaims()`로 직접 검증 (role==='admin' 강제)
 7. 로그아웃: `DELETE /api/auth` → 동일 옵션의 빈 쿠키(maxAge=0)로 덮어 삭제
+
+### 태블릿 인증 흐름 (admin과 별도)
+1. 운영자(선생님)가 `/tablet/login`에서 1회 비밀번호 입력 → `POST /api/auth/tablet` (rate limit: IP 5/min)
+2. `academies.tablet_password_hash`와 `bcrypt.compare` (admin_password_hash와 분리된 별도 컬럼)
+3. 일치 시 `signToken({ academy_id, role: 'tablet' })`로 24시간 JWT 발급 — admin보다 짧음 (공용 기기 노출 면적 제한)
+4. httpOnly 쿠키(`tablet_token`)에 저장 → 학생들이 키오스크에서 출석체크 가능
+5. `middleware.ts`가 `/tablet/*` 진입 시 admin 또는 tablet 토큰 어느 쪽이든 통과 (운영자 디버깅 허용)
+6. `/api/attendance`는 `getTabletOrAdminClaims()`로 검증, `academy_id`를 claims에서 직접 사용
+7. 24시간 만료 시 KioskApp이 401을 받아 `/tablet/login`으로 자동 리다이렉트 → 선생님 재로그인
+
+### 보안 정책
+- **RLS**: 모든 테이블 RLS 활성화, 정책 0개 = anon 전면 거부. 서버는 `service_role` 키로 RLS 우회 (PR1)
+- **인증 분리**: admin(7d) / tablet(24h) 쿠키와 role 분리 — 한쪽 노출 시 다른 쪽 영향 격리
+- **Rate limit** (Upstash sliding window):
+  - `authLogin`: IP 5/min (admin·tablet 로그인 brute-force)
+  - `attendanceIp`: IP 30/min, `attendanceToken`: academy_id 60/min
+  - `retryNotif`: IP 10/min (수동 재전송 비용 방어)
+- **`/api/notify` 게이트**: `x-cron-secret` 헤더 필수 — 자체 호출(`/api/attendance`, retry)도 동봉
+- **보안 헤더**: HSTS, X-Frame-Options=DENY, X-Content-Type-Options=nosniff, Referrer-Policy, Permissions-Policy
 
 ---
 
@@ -143,11 +168,19 @@ notification_logs  알림톡 발송 상태 + 재시도 관리 (attempt_count 최
 ```
 # Supabase
 NEXT_PUBLIC_SUPABASE_URL
-NEXT_PUBLIC_SUPABASE_ANON_KEY
-NEXT_PUBLIC_ACADEMY_ID         # 단일 학원 운영 시 출석 API에서 사용
+NEXT_PUBLIC_SUPABASE_ANON_KEY  # 현재 미사용/호환용 잔존 (RLS 활성화로 0 row만 반환)
+SUPABASE_SERVICE_ROLE_KEY      # 서버 라우트 전용. NEXT_PUBLIC_ 접두 절대 금지
+NEXT_PUBLIC_ACADEMY_ID         # (현재 출석 API에서는 미사용 — claims에서 받음)
 
-# 관리자 JWT
-JWT_SECRET                     # HS256 서명 키 (충분히 긴 무작위 문자열)
+# 인증 — admin/tablet 모두 동일 시크릿 사용 (role 필드로 분리)
+JWT_SECRET                     # HS256 서명 키 (32바이트+ 권장)
+
+# 서버↔서버 / cron→서버 공유 비밀 — /api/notify 게이트
+CRON_SECRET                    # openssl rand -hex 32
+
+# Upstash Redis (rate limit)
+UPSTASH_REDIS_REST_URL
+UPSTASH_REDIS_REST_TOKEN
 
 # 솔라피 — 카카오 알림톡 + SMS 폴백 발송
 SOLAPI_API_KEY
@@ -189,6 +222,6 @@ SOLAPI_TEMPLATE_ID_CHECKOUT
 - 스타일: Tailwind CSS only (별도 CSS 파일 금지)
 - 컴포넌트: Server Component 기본, 인터랙션 필요한 경우만 `'use client'`
 - 환경변수: `.env.local` 사용, 절대 하드코딩 금지
-- Supabase 클라이언트: server/client 분리 (`supabase/server.ts`, `supabase/client.ts`)
+- Supabase 클라이언트: 서버 전용 (`supabase/server.ts`, service_role 키 사용 — `'use client'`에서 import 금지)
 - 외부 입력: `unknown`으로 받아 타입 가드로 좁힘 (`any` 금지)
 - 새 파일은 작업 단위마다 한국어 WHAT 주석 + 비자명한 부분에 WHY 주석

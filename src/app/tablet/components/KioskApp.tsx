@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import MainScreen from './MainScreen'
 import KeypadScreen from './KeypadScreen'
 import SelectScreen from './SelectScreen'
@@ -43,6 +44,7 @@ const modeToType = (m: Mode): 'checkin' | 'checkout' =>
 const ATTENDANCE_TIMEOUT_MS = 6000
 
 export default function KioskApp() {
+  const router = useRouter()
   const [screen, setScreen] = useState<Screen>('main')
   const [mode, setMode] = useState<Mode>('in')
   const [pin, setPin] = useState('')
@@ -149,14 +151,22 @@ export default function KioskApp() {
           }),
           signal: controller.signal,
         })
+        // tablet 토큰 만료/누락 → 즉시 로그인 페이지로 이동.
+        // why: 미들웨어가 페이지 진입은 막지만, 페이지가 떠 있는 동안 토큰이 만료되면
+        //      여기서만 401이 떨어진다. 사용자에게 NOT_FOUND/오류 화면을 띄우는 대신
+        //      바로 로그인 화면으로 보내는 편이 직관적.
+        if (res.status === 401) {
+          router.replace('/tablet/login')
+          return { ok: false, status: 401, body: null, redirected: true as const }
+        }
         // 본문은 항상 JSON. 비즈니스 분기 응답도 200이라서 res.ok로 검증 후 body로 분기.
         const json = (await res.json().catch(() => null)) as AttendanceResponse | null
-        return { ok: res.ok, status: res.status, body: json }
+        return { ok: res.ok, status: res.status, body: json, redirected: false as const }
       } finally {
         clearTimeout(timer)
       }
     },
-    [],
+    [router],
   )
 
   // ── 응답 분기 → 화면 전환 ─────────────────────────────────────────
@@ -231,7 +241,9 @@ export default function KioskApp() {
         if (submittingRef.current) return
         submittingRef.current = true
         try {
-          const { ok, body } = await callAttendance(next, modeToType(mode))
+          const { ok, body, redirected } = await callAttendance(next, modeToType(mode))
+          // 401 리다이렉트가 일어난 경우 화면 분기 스킵 — router.replace가 곧 페이지를 갈아끼움.
+          if (redirected) return
           handleResponse(body, ok)
         } catch (err) {
           console.error('[kiosk] attendance request failed:', err)
@@ -256,7 +268,8 @@ export default function KioskApp() {
     setSubmitting(true)
     try {
       // 두 번째 호출: 같은 4자리 + 선택된 student_id로 단일 학생 확정.
-      const { ok, body } = await callAttendance(pin, modeToType(mode), match.student.id)
+      const { ok, body, redirected } = await callAttendance(pin, modeToType(mode), match.student.id)
+      if (redirected) return
       handleResponse(body, ok)
     } catch (err) {
       console.error('[kiosk] attendance pick request failed:', err)

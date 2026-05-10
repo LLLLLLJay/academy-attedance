@@ -1,34 +1,46 @@
 /**
  * POST /api/attendance — 학생 등원/하원 출석 처리 라우트
  *
+ * 인증: tablet 또는 admin 토큰 쿠키 필수 (lib/auth/tablet.ts).
+ *       academy_id는 항상 claims에서 받아 외부 주입 통로를 차단.
+ *
  * 전체 흐름:
- *   0. 요청 본문 파싱 + 형식 검증
- *   1. phone_last4로 후보 학생 조회 (학원·활성 필터)
- *      - 0명: NOT_FOUND / 2명+: MULTIPLE / 1명: 다음 단계
- *   2. 쿨타임 체크 (동일 학생 + 동일 type, 5분 이내 차단)
- *   3. attendance_logs 기록
- *   4. 학부모 수만큼 notification_logs를 'pending'으로 적재
- *   5. /api/notify 비동기 호출 (현재 TODO)
- *   6. 성공 응답
+ *   -1. 인증 게이트 (tablet/admin 쿠키)
+ *    0. Rate limit (IP × 토큰 두 차원)
+ *    1. 본문 파싱 + 형식 검증
+ *    2. phone_last4로 후보 학생 조회 (학원·활성 필터)
+ *       - 0명: NOT_FOUND / 2명+: MULTIPLE / 1명: 다음 단계
+ *    3. 쿨타임 체크 (동일 학생 + 동일 type, 5분 이내 차단)
+ *    4. attendance_logs 기록
+ *    5. 학부모 수만큼 notification_logs를 'pending'으로 적재
+ *    6. /api/notify 비동기 호출 (cron secret 헤더 동봉)
+ *    7. 성공 응답
  *
  * 응답 status code 정책:
  *   - 200: 비즈니스 분기 전부 (success/NOT_FOUND/MULTIPLE/COOLDOWN)
  *          → 클라이언트는 res.ok 후 body.error 필드만 보고 분기
  *   - 400: 본문 검증 실패
+ *   - 401: 인증 토큰 없음/위조/만료
+ *   - 429: rate limit 초과
  *   - 500: DB 오류 등 서버 문제
  */
 
 import { NextResponse } from 'next/server';
 
 import { createClient } from '@/lib/supabase/server';
+import { getTabletOrAdminClaims } from '@/lib/auth/tablet';
+import { rateLimit, getClientIp } from '@/lib/ratelimit';
+import { CRON_SECRET_HEADER } from '@/lib/auth/cron';
 import type { AttendanceType, TablesInsert } from '@/lib/types/database';
 
 // 외부 입력은 형태를 신뢰할 수 없어 unknown으로 받아 런타임에 검증한다.
 // (any로 받으면 타입 시스템이 검증을 강제하지 못함)
+//
+// academy_id 필드는 더 이상 받지 않는다 — 인증 토큰의 claims.academy_id로 강제.
+// why: 외부에서 다른 학원 ID를 주입할 통로를 차단.
 type AttendanceRequest = {
   phone_last4?: unknown;
   type?: unknown;
-  academy_id?: unknown;
   student_id?: unknown;
 };
 
@@ -37,7 +49,29 @@ type AttendanceRequest = {
 const COOLDOWN_MINUTES = 5;
 
 export async function POST(request: Request) {
-  // ── 0. 요청 본문 파싱 ─────────────────────────────────────────
+  // ── -1. 인증 게이트 ──────────────────────────────────────────
+  //
+  // tablet 또는 admin 토큰 필수. 두 경로 모두 academy_id를 토큰에서 받아 사용한다.
+  // why: 익명 호출을 허용하면 알림톡 비용 폭탄(스팸 발송)·brute-force·DoS 통로가 됨.
+  const claims = await getTabletOrAdminClaims();
+  if (!claims) {
+    return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 });
+  }
+
+  // ── 0. Rate limit (IP × 토큰 둘 다) ──────────────────────────
+  //
+  // 두 차원으로 나눠 거는 이유:
+  //   - IP만 걸면 같은 학원 NAT 뒤에 여러 디바이스 사용 시 서로 차단할 수 있음.
+  //   - 토큰만 걸면 한 토큰이 여러 IP로 분산되는 케이스를 못 막음.
+  // 하나라도 한도 초과면 429.
+  const ip = getClientIp(request);
+  const ipResult = await rateLimit.attendanceIp.limit(ip);
+  const tokenResult = await rateLimit.attendanceToken.limit(claims.academy_id);
+  if (!ipResult.success || !tokenResult.success) {
+    return NextResponse.json({ error: 'TOO_MANY_REQUESTS' }, { status: 429 });
+  }
+
+  // ── 1. 요청 본문 파싱 ─────────────────────────────────────────
 
   // request.json()은 본문이 비었거나 JSON이 아니면 throw → 400으로 매핑.
   // 여기서 막지 않으면 아래 분기에서 undefined.X 형태로 더 모호한 에러가 난다.
@@ -52,10 +86,6 @@ export async function POST(request: Request) {
   // 문자열이 아니면 빈 문자열로 떨어뜨려 다음 검증 단계에서 일관되게 거른다.
   const phone_last4 = typeof body.phone_last4 === 'string' ? body.phone_last4 : '';
   const type = body.type;
-  const bodyAcademyId =
-    typeof body.academy_id === 'string' && body.academy_id.length > 0
-      ? body.academy_id
-      : '';
   // student_id는 옵셔널 — MULTIPLE 응답을 받은 클라이언트가 학생을 고른 뒤에만 넣어 보낸다.
   const student_id =
     typeof body.student_id === 'string' && body.student_id.length > 0
@@ -64,7 +94,7 @@ export async function POST(request: Request) {
 
   // 본문 형식 검증: 정확히 숫자 4자리인지 / type이 enum 값인지.
   // why: DB까지 가기 전에 잘못된 입력을 거절해 불필요한 쿼리·로그를 방지.
-  //      academy_id는 아래 단계에서 env/DB로 보강하므로 여기선 검증하지 않는다.
+  //      academy_id는 인증 토큰의 claims에서 직접 가져오므로 본문 검증 대상 아님.
   if (!/^\d{4}$/.test(phone_last4)) {
     return NextResponse.json({ error: 'INVALID_PHONE' }, { status: 400 });
   }
@@ -75,61 +105,14 @@ export async function POST(request: Request) {
   // 검증 통과 시점에 attendanceType을 enum 타입으로 고정 → 이후 DB insert에 그대로 사용 가능.
   const attendanceType: AttendanceType = type;
 
-  // 서버 컴포넌트/라우트 핸들러용 Supabase 클라이언트 생성 (쿠키 기반 세션 관리).
+  // 서버 라우트용 Supabase 클라이언트 (service_role 키로 RLS 우회).
   const supabase = await createClient();
 
-  // ── 0b. academy_id 결정 (env → body → academies 첫 row) ──────
-  //
-  // 태블릿은 로그인이 없어 JWT/세션이 없고 body에 academy_id를 실어 보낼 출처도 없다.
-  // 그래서 서버에서 다음 우선순위로 보강한다:
-  //   1) NEXT_PUBLIC_ACADEMY_ID (운영에서 학원별로 박아 넣는 표준 경로)
-  //   2) body.academy_id (관리자/테스트 클라이언트가 명시적으로 넘긴 경우)
-  //   3) academies 테이블의 첫 row (단일 학원 운영 환경의 fallback)
-  // why: 4자리는 학원 간 우연히 겹칠 수 있어 academy_id 필터가 빠지면 다른 학원
-  //      학생이 잡혀 NOT_FOUND/MULTIPLE이 잘못 떨어지므로 반드시 1개로 결정해야 한다.
-  let academy_id = '';
-  let academySource: 'env' | 'body' | 'db' | 'none' = 'none';
-
-  const envAcademyId = process.env.NEXT_PUBLIC_ACADEMY_ID ?? '';
-  if (envAcademyId) {
-    academy_id = envAcademyId;
-    academySource = 'env';
-  } else if (bodyAcademyId) {
-    academy_id = bodyAcademyId;
-    academySource = 'body';
-  } else {
-    // env도 body도 없으면 DB에서 가장 오래된 학원 1개를 집어 사용한다 (단일 학원 가정).
-    const { data: firstAcademy, error: academyErr } = await supabase
-      .from('academies')
-      .select('id')
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (academyErr) {
-      return NextResponse.json(
-        { error: 'DB_ERROR', detail: academyErr.message },
-        { status: 500 },
-      );
-    }
-    if (firstAcademy?.id) {
-      academy_id = firstAcademy.id;
-      academySource = 'db';
-    }
-  }
-
-  // 디버깅용 로그 — 어디서 academy_id가 왔는지/실제 값이 무엇인지 확인.
-  // (배포 전에 제거하거나 NODE_ENV 체크로 감싸도 됨)
-  console.log('[attendance] academy_id resolved:', {
-    source: academySource,
-    academy_id,
-    bodyAcademyId,
-    envAcademyId,
-  });
-
-  if (!academy_id) {
-    // env/body/DB 어디에도 학원이 없으면 더 이상 진행 불가.
-    return NextResponse.json({ error: 'MISSING_ACADEMY' }, { status: 400 });
-  }
+  // academy_id는 인증된 토큰에서만 받는다.
+  // why: 외부에서 academy_id를 주입할 통로(body/env)를 닫아 학원 격리를 강제.
+  //      claims는 /api/auth(admin) 또는 /api/auth/tablet 발급 시점에 academies row의
+  //      실제 id로 박혀 있으므로 추가 DB 조회 불필요.
+  const academy_id = claims.academy_id;
 
   // ── 1. phone_last4 → 후보 학생 ID 모으기 ─────────────────────
 
@@ -326,9 +309,15 @@ export async function POST(request: Request) {
   //      태블릿은 빠르게 "등원 완료" 화면으로 넘어가야 다음 학생을 받을 수 있다.
   //      네트워크 오류로 트리거 자체가 실패해도 pending 행은 남아 있으므로
   //      후속 pg_cron 워커가 픽업해 재시도한다.
+  //
+  // x-cron-secret: /api/notify가 익명 호출을 차단하므로 같은 origin 자체 호출도
+  //                공유 비밀 헤더를 동봉해야 통과한다 (lib/auth/cron.ts 참고).
   void fetch(new URL('/api/notify', request.url), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      [CRON_SECRET_HEADER]: process.env.CRON_SECRET ?? '',
+    },
     body: JSON.stringify({ attendance_id: attendance.id }),
   }).catch((err) => {
     console.error('[attendance] notify dispatch failed:', err);

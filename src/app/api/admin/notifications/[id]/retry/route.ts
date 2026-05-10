@@ -25,6 +25,8 @@ import { NextResponse } from 'next/server';
 
 import { createClient } from '@/lib/supabase/server';
 import { getAdminClaims } from '@/lib/auth/admin';
+import { rateLimit, getClientIp } from '@/lib/ratelimit';
+import { CRON_SECRET_HEADER } from '@/lib/auth/cron';
 import type { TablesUpdate } from '@/lib/types/database';
 
 // /api/notify의 MAX_ATTEMPT(3)와 일치해야 함 — 한 곳에 두 군데 상수 분기를
@@ -38,6 +40,14 @@ export async function POST(
   const claims = await getAdminClaims();
   if (!claims) {
     return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 });
+  }
+
+  // Rate limit — 운영자가 의도적·실수로 같은 행을 연타해 솔라피 비용을 폭주시키는 케이스 차단.
+  // IP당 10회/분이면 정상 운영자 수동 재전송엔 충분히 여유.
+  const ip = getClientIp(_request);
+  const { success } = await rateLimit.retryNotif.limit(ip);
+  if (!success) {
+    return NextResponse.json({ error: 'TOO_MANY_REQUESTS' }, { status: 429 });
   }
 
   const { id } = await context.params;
@@ -111,7 +121,11 @@ export async function POST(
   try {
     const notifyRes = await fetch(new URL('/api/notify', _request.url), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        // /api/notify 익명 호출 차단으로 자체 호출도 공유 비밀이 필요.
+        [CRON_SECRET_HEADER]: process.env.CRON_SECRET ?? '',
+      },
       body: JSON.stringify({ attendance_id: notif.attendance_id }),
     });
     notifyBody = (await notifyRes.json()) as typeof notifyBody;

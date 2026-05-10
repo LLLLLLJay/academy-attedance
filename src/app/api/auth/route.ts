@@ -20,6 +20,7 @@ import bcrypt from 'bcryptjs';
 
 import { createClient } from '@/lib/supabase/server';
 import { ADMIN_COOKIE_NAME, signAdminToken } from '@/lib/auth/jwt';
+import { rateLimit, getClientIp } from '@/lib/ratelimit';
 
 // 쿠키 만료 — JWT의 7d와 맞춤. 둘이 어긋나면 쿠키만 살아있고 토큰은 만료된 어색한 상태가 생김.
 const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
@@ -29,6 +30,14 @@ type AuthRequest = {
 };
 
 export async function POST(request: Request) {
+  // ── 0. Rate limit ───────────────────────────────────────────
+  // IP당 5회/분. brute-force 방지 — 정상 사용자는 1~2회면 끝남.
+  const ip = getClientIp(request);
+  const { success } = await rateLimit.authLogin.limit(ip);
+  if (!success) {
+    return NextResponse.json({ error: 'TOO_MANY_REQUESTS' }, { status: 429 });
+  }
+
   // ── 1. 본문 파싱 + 검증 ──────────────────────────────────────
 
   // request.json() 실패 시 throw → 400으로 매핑

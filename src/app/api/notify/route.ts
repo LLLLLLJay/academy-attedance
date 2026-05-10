@@ -27,6 +27,7 @@ import { NextResponse } from 'next/server';
 import { createHmac, randomBytes } from 'node:crypto';
 
 import { createClient } from '@/lib/supabase/server';
+import { isValidCronSecret } from '@/lib/auth/cron';
 import type { TablesUpdate } from '@/lib/types/database';
 
 // 솔라피 단건 발송 엔드포인트 (REST v4)
@@ -49,6 +50,15 @@ type NotifyRequest = {
 type ServerSupabase = Awaited<ReturnType<typeof createClient>>;
 
 export async function POST(request: Request) {
+  // ── -1. cron secret 게이트 ──────────────────────────────────
+  //
+  // 호출 주체가 사람이 아니라 자체 서버(/api/attendance) 또는 향후 pg_cron이라
+  // JWT 대신 공유 비밀로 게이트한다. 비밀 누락 시 즉시 401.
+  // why: 익명 호출 허용 시 알림톡 비용 폭탄·스팸 발송 통로가 됨.
+  if (!isValidCronSecret(request)) {
+    return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 });
+  }
+
   // ── 0. 본문 파싱 + 환경변수 검증 ──────────────────────────────
 
   // request.json() 실패 시 throw → 400으로 매핑.

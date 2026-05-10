@@ -24,18 +24,22 @@ export type Database = {
           id: string;
           name: string;
           admin_password_hash: string;
+          // 0004_tablet_password.sql — 키오스크 로그인용 bcrypt 해시. 운영자가 별도 시딩 전엔 null.
+          tablet_password_hash: string | null;
           created_at: string;
         };
         Insert: {
           id?: string;
           name: string;
           admin_password_hash: string;
+          tablet_password_hash?: string | null;
           created_at?: string;
         };
         Update: {
           id?: string;
           name?: string;
           admin_password_hash?: string;
+          tablet_password_hash?: string | null;
           created_at?: string;
         };
         Relationships: [];

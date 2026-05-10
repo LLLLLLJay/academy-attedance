@@ -27,6 +27,8 @@ academies
 |---|---|
 | `0001_initial.sql` | academies / students / student_parents / attendance_logs / notification_logs (현재 미작성 — 아래 §2의 SQL을 그대로 사용) |
 | `supabase/migrations/0002_classes.sql` | classes / student_classes (반 도입) |
+| `supabase/migrations/0003_rls.sql` | 모든 테이블 RLS 활성화 (정책 0개 = anon 전면 거부, service_role만 통과) |
+| `supabase/migrations/0004_tablet_password.sql` | `academies.tablet_password_hash` 컬럼 추가 (키오스크 로그인 비밀번호) |
 
 > 본 문서 §2는 "현재 시점의 최종 스키마"를 한곳에 모은 참고용 정의다. 운영 DB에는 마이그레이션 파일을 통해 점진 적용한다.
 
@@ -40,6 +42,7 @@ academies
     id                    uuid primary key default gen_random_uuid(),
     name                  text not null,
     admin_password_hash   text not null,   -- 관리자 로그인용 bcrypt 해시
+    tablet_password_hash  text,            -- 키오스크 로그인용 bcrypt 해시 (0004 마이그레이션, 운영자가 별도 시딩)
     created_at            timestamptz default now()
   );
 
@@ -288,5 +291,24 @@ order by d::date desc, s.name asc;
 
 ## 6. 미결 사항 (Next Steps)
 
-- [ ] Supabase RLS(Row Level Security) 정책 설계
+- [x] Supabase RLS(Row Level Security) 정책 설계 — `0003_rls.sql` (§7 참고)
 - [ ] notification_logs 재시도 스케줄러 (pg_cron + Edge Function) 설계
+
+---
+
+## 7. RLS 정책
+
+모든 테이블 RLS 활성화 + 정책 0개 = anon/authenticated 전면 거부.
+서버 라우트는 service_role 키로 접근해 RLS를 우회한다.
+
+| 키 | 사용처 | RLS |
+|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | 브라우저 노출 (현재 미사용/호환용 잔존) | 적용 → 0 row |
+| `SUPABASE_SERVICE_ROLE_KEY` | 서버 라우트 전용 (`src/lib/supabase/server.ts`) | 우회 |
+
+**왜 정책을 만들지 않나**: 앱이 Supabase Auth를 사용하지 않는다. 자체 jose JWT 쿠키로 인증한 서버가 신뢰 경계이며, 거기서 academy_id를 검증한 뒤 service_role로 DB에 접근한다. anon 컨텍스트로 통과시킬 사용자가 없으므로 정책을 비워 두는 것이 가장 단순한 거부 정책이다.
+
+**보안 주의**:
+- `SUPABASE_SERVICE_ROLE_KEY`에 `NEXT_PUBLIC_` 접두 절대 금지 (브라우저 번들 노출 시 RLS 무력화).
+- `src/lib/supabase/server.ts`를 `'use client'` 컴포넌트에서 import 금지.
+- 향후 Supabase Auth를 도입한다면 여기에 정책을 추가하고 server.ts를 anon/JWT 기반으로 되돌려야 한다.
